@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %></title>
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <nav class="navbar">
+            <div class="container">
+                <a href="/" class="logo">Dox<span>Bot</span></a>
+                <ul class="nav-links">
+                    <li><a href="/"><i class="fas fa-home"></i> Главная</a></li>
+                    <li><a href="/ip"><i class="fas fa-network-wired"></i> Поиск по IP</a></li>
+                    <li><a href="/phone" class="active"><i class="fas fa-phone"></i> Поиск по номеру</a></li>
+                    <li><a href="/about"><i class="fas fa-info-circle"></i> О проекте</a></li>
+                </ul>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container">
+        <h1><i class="fas fa-phone"></i> Поиск по номеру телефона</h1>
+        <p class="subtitle">Введите номер телефона в международном формате (например, +79161234567) для проверки валидности, оператора и региона.</p>
+
+        <form method="POST" action="/phone" class="search-form">
+            <div class="input-group">
+                <input type="text" name="phone" placeholder="+79161234567" value="<%= data ? data.number : '' %>" required>
+                <button type="submit" class="btn btn-primary"><i class="fas fa-search"></i> Проверить</button>
+            </div>
+        </form>
+
+        <% if (error) { %>
+            <div class="alert alert-error">
+                <i class="fas fa-exclamation-triangle"></i> <%= error %>
+            </div>
+        <% } %>
+
+        <% if (data && data.valid) { %>
+            <div class="result-card">
+                <h2><i class="fas fa-check-circle"></i> Результат для номера: <%= data.number %></h2>
+                <div class="result-grid">
+                    <div class="result-item">
+                        <span class="label">Действителен</span>
+                        <span class="value"><%= data.valid ? 'Да' : 'Нет' %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Локальный формат</span>
+                        <span class="value"><%= data.local_format %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Международный формат</span>
+                        <span class="value"><%= data.international_format %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Страна</span>
+                        <span class="value"><%= data.country_name %> (<%= data.country_code %>)</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Код страны</span>
+                        <span class="value">+<%= data.country_prefix %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Оператор</span>
+                        <span class="value"><%= data.carrier %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Тип линии</span>
+                        <span class="value"><%= data.line_type %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Расположение</span>
+                        <span class="value"><%= data.location %></span>
+                    </div>
+                </div>
+            </div>
+        <% } else if (data && !data.valid) { %>
+            <div class="alert alert-warning">
+                <i class="fas fa-exclamation-circle"></i> Номер <strong><%= data.number %></strong> недействителен.
+            </div>
+        <% } %>
+
+        <div class="info-box">
+            <h3><i class="fas fa-lightbulb"></i> Примечание</h3>
+            <p>Мы используем API <strong>numverify.com</strong> (демо‑ключ). Для полноценного использования рекомендуется получить собственный API‑ключ на сайте numverify.com и добавить его в файл <code>.env</code>.</p>
+        </div>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>Dox Bot &copy; 2023 | Инструмент для этичного поиска информации.</p>
+            <p class="disclaimer">Данный проект предназначен только для образовательных целей.</p>
+        </div>
+    </footer>
+
+    <script src="/js/script.js"></script>
+</body>
+</html>

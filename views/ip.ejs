@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %></title>
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <nav class="navbar">
+            <div class="container">
+                <a href="/" class="logo">Dox<span>Bot</span></a>
+                <ul class="nav-links">
+                    <li><a href="/"><i class="fas fa-home"></i> Главная</a></li>
+                    <li><a href="/ip" class="active"><i class="fas fa-network-wired"></i> Поиск по IP</a></li>
+                    <li><a href="/phone"><i class="fas fa-phone"></i> Поиск по номеру</a></li>
+                    <li><a href="/about"><i class="fas fa-info-circle"></i> О проекте</a></li>
+                </ul>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container">
+        <h1><i class="fas fa-network-wired"></i> Поиск информации по IP</h1>
+        <p class="subtitle">Введите IP‑адрес (например, 8.8.8.8) для получения геоданных, провайдера и другой информации.</p>
+
+        <form method="POST" action="/ip" class="search-form">
+            <div class="input-group">
+                <input type="text" name="ip" placeholder="Введите IP‑адрес" value="<%= data ? data.query : '' %>" required>
+                <button type="submit" class="btn btn-primary"><i class="fas fa-search"></i> Найти</button>
+            </div>
+        </form>
+
+        <% if (error) { %>
+            <div class="alert alert-error">
+                <i class="fas fa-exclamation-triangle"></i> <%= error %>
+            </div>
+        <% } %>
+
+        <% if (data) { %>
+            <div class="result-card">
+                <h2><i class="fas fa-info-circle"></i> Результат для IP: <%= data.query %></h2>
+                <div class="result-grid">
+                    <div class="result-item">
+                        <span class="label">Страна</span>
+                        <span class="value"><%= data.country %> (<%= data.countryCode %>)</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Регион</span>
+                        <span class="value"><%= data.regionName %> (<%= data.region %>)</span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Город</span>
+                        <span class="value"><%= data.city %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Индекс</span>
+                        <span class="value"><%= data.zip %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Координаты</span>
+                        <span class="value"><%= data.lat %>, <%= data.lon %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Часовой пояс</span>
+                        <span class="value"><%= data.timezone %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Провайдер</span>
+                        <span class="value"><%= data.isp %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">Организация</span>
+                        <span class="value"><%= data.org %></span>
+                    </div>
+                    <div class="result-item">
+                        <span class="label">AS</span>
+                        <span class="value"><%= data.as %></span>
+                    </div>
+                </div>
+                <div class="map-link">
+                    <a href="https://www.openstreetmap.org/?mlat=<%= data.lat %>&mlon=<%= data.lon %>" target="_blank" class="btn btn-outline">
+                        <i class="fas fa-map-marked-alt"></i> Открыть на карте
+                    </a>
+                </div>
+            </div>
+        <% } %>
+
+        <div class="info-box">
+            <h3><i class="fas fa-lightbulb"></i> Как это работает?</h3>
+            <p>Мы используем публичное API <strong>ip-api.com</strong>, которое предоставляет бесплатные данные о местоположении по IP. Введённый IP не сохраняется.</p>
+        </div>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>Dox Bot &copy; 2023 | Инструмент для этичного поиска информации.</p>
+            <p class="disclaimer">Данный проект предназначен только для образовательных целей.</p>
+        </div>
+    </footer>
+
+    <script src="/js/script.js"></script>
+</body>
+</html>

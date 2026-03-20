@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %></title>
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <nav class="navbar">
+            <div class="container">
+                <a href="/" class="logo">Dox<span>Bot</span></a>
+                <ul class="nav-links">
+                    <li><a href="/"><i class="fas fa-home"></i> Главная</a></li>
+                    <li><a href="/ip"><i class="fas fa-network-wired"></i> Поиск по IP</a></li>
+                    <li><a href="/phone"><i class="fas fa-phone"></i> Поиск по номеру</a></li>
+                    <li><a href="/about" class="active"><i class="fas fa-info-circle"></i> О проекте</a></li>
+                </ul>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container">
+        <h1><i class="fas fa-info-circle"></i> О проекте Dox Bot</h1>
+        <div class="about-content">
+            <p>Dox Bot — это веб‑инструмент, созданный для демонстрации возможностей публичных API в области поиска информации по IP‑адресам и номерам телефонов.</p>
+
+            <h2><i class="fas fa-bullseye"></i> Цели проекта</h2>
+            <ul>
+                <li>Показать, как можно легально и этично получать открытые данные о сетевых адресах и телефонах.</li>
+                <li>Предоставить удобный интерфейс для быстрой проверки.</li>
+                <li>Образовательная цель — помочь разработчикам понять работу с API геолокации и валидации.</li>
+            </ul>
+
+            <h2><i class="fas fa-cogs"></i> Технологии</h2>
+            <div class="tech-grid">
+                <div class="tech-card">
+                    <i class="fab fa-node-js"></i>
+                    <h3>Node.js + Express</h3>
+                    <p>Серверная часть на JavaScript.</p>
+                </div>
+                <div class="tech-card">
+                    <i class="fas fa-code"></i>
+                    <h3>EJS</h3>
+                    <p>Шаблонизатор для динамических страниц.</p>
+                </div>
+                <div class="tech-card">
+                    <i class="fas fa-cloud"></i>
+                    <h3>Внешние API</h3>
+                    <p>ip‑api.com, numverify.com.</p>
+                </div>
+                <div class="tech-card">
+                    <i class="fab fa-css3-alt"></i>
+                    <h3>CSS3 + Flexbox</h3>
+                    <p>Современный адаптивный дизайн.</p>
+                </div>
+            </div>
+
+            <h2><i class="fas fa-shield-alt"></i> Этическое использование</h2>
+            <p>Данный инструмент предназначен <strong>исключительно для образовательных и легальных целей</strong>. Запрещено использовать его для:</p>
+            <ul>
+                <li>Сбора персональных данных без согласия.</li>
+                <li>Преследования, harassment или кибербуллинга.</li>
+                <li>Любых действий, нарушающих законодательство.</li>
+            </ul>
+            <p>Мы не храним введённые пользователями IP или номера телефонов. Все запросы идут напрямую к внешним API.</p>
+
+            <h2><i class="fas fa-code-branch"></i> Исходный код</h2>
+            <p>Проект открыт для изучения и улучшения. Исходный код доступен на <a href="https://github.com/yourusername/dox-bot" target="_blank">GitHub</a>.</p>
+
+            <h2><i class="fas fa-envelope"></i> Контакты</h2>
+            <p>По вопросам сотрудничества или предложений пишите на <a href="mailto:contact@example.com">contact@example.com</a>.</p>
+        </div>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>Dox Bot &copy; 2023 | Инструмент для этичного поиска информации.</p>
+            <p class="disclaimer">Данный проект предназначен только для образовательных целей.</p>
+        </div>
+    </footer>
+
+    <script src="/js/script.js"></script>
+</body>
+</html>

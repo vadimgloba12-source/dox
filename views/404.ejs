@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %></title>
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <nav class="navbar">
+            <div class="container">
+                <a href="/" class="logo">Dox<span>Bot</span></a>
+                <ul class="nav-links">
+                    <li><a href="/"><i class="fas fa-home"></i> Главная</a></li>
+                    <li><a href="/ip"><i class="fas fa-network-wired"></i> Поиск по IP</a></li>
+                    <li><a href="/phone"><i class="fas fa-phone"></i> Поиск по номеру</a></li>
+                    <li><a href="/about"><i class="fas fa-info-circle"></i> О проекте</a></li>
+                </ul>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container" style="text-align: center; padding: 4rem 1rem;">
+        <div class="error-page">
+            <i class="fas fa-exclamation-triangle" style="font-size: 5rem; color: #ff6b6b;"></i>
+            <h1>404 — Страница не найдена</h1>
+            <p>Запрашиваемая вами страница не существует или была перемещена.</p>
+            <div class="cta-buttons" style="margin-top: 2rem;">
+                <a href="/" class="btn btn-primary"><i class="fas fa-home"></i> Вернуться на главную</a>
+                <a href="/ip" class="btn btn-outline"><i class="fas fa-network-wired"></i> Поиск по IP</a>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>Dox Bot &copy; 2023 | Инструмент для этичного поиска информации.</p>
+            <p class="disclaimer">Данный проект предназначен только для образовательных целей.</p>
+        </div>
+    </footer>
+
+    <script src="/js/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %></title>
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <nav class="navbar">
+            <div class="container">
+                <a href="/" class="logo">Dox<span>Bot</span></a>
+                <ul class="nav-links">
+                    <li><a href="/"><i class="fas fa-home"></i> Главная</a></li>
+                    <li><a href="/ip"><i class="fas fa-network-wired"></i> Поиск по IP</a></li>
+                    <li><a href="/phone"><i class="fas fa-phone"></i> Поиск по номеру</a></li>
+                    <li><a href="/phone-to-ip"><i class="fas fa-mobile-alt"></i> IP по номеру</a></li>
+                    <li><a href="/about"><i class="fas fa-info-circle"></i> О проекте</a></li>
+                </ul>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container">
+        <section class="hero">
+            <h1><i class="fas fa-search"></i> Dox Bot</h1>
+            <p class="subtitle">Мощный инструмент для получения информации по IP‑адресам, номерам телефонов и геолокации.</p>
+            <div class="cta-buttons">
+                <a href="/ip" class="btn btn-primary"><i class="fas fa-network-wired"></i> Начать поиск по IP</a>
+                <a href="/phone" class="btn btn-secondary"><i class="fas fa-phone"></i> Проверить номер</a>
+                <a href="/phone-to-ip" class="btn btn-outline"><i class="fas fa-mobile-alt"></i> IP по номеру</a>
+            </div>
+        </section>
+
+        <section class="features">
+            <h2>Что умеет бот?</h2>
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-map-marker-alt"></i>
+                    </div>
+                    <h3>Геолокация по IP</h3>
+                    <p>Определите страну, город, провайдера и координаты по IP‑адресу.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-phone-alt"></i>
+                    </div>
+                    <h3>Валидация номера</h3>
+                    <p>Проверьте номер телефона на действительность, определите оператора и регион.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-mobile-alt"></i>
+                    </div>
+                    <h3>IP по номеру</h3>
+                    <p>Оценка вероятного IP‑адреса на основе номера телефона и оператора.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-shield-alt"></i>
+                    </div>
+                    <h3>Безопасность</h3>
+                    <p>Используем только публичные API, не храним ваши данные.</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="how-to">
+            <h2>Как использовать?</h2>
+            <ol>
+                <li>Выберите нужный инструмент в меню.</li>
+                <li>Введите IP‑адрес или номер телефона.</li>
+                <li>Нажмите «Поиск» и получите подробный отчёт.</li>
+            </ol>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>Dox Bot &copy; 2023 | Инструмент для этичного поиска информации.</p>
+            <p class="disclaimer">Данный проект предназначен только для образовательных целей.</p>
+        </div>
+    </footer>
+
+    <script src="/js/script.js"></script>
+</body>
+</html>
