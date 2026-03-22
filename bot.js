@@ -48,6 +48,7 @@ const COSTS = {
     photo_search:    10,
     kompromat:       20,
     address_search:  15,
+    full_dossier:    45,  // экономия 15 ⭐ vs раздельно (15+10+15+20=60)
 };
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -88,12 +89,11 @@ function isAdmin(ctx, next) {
 
 function mainMenuKeyboard() {
     return Markup.inlineKeyboard([
+        [Markup.button.callback('📋 Полное досье (ФИО+фото+адрес+компромат)', 'full_dossier')],
         [Markup.button.callback('🌐 Поиск по IP-адресу', 'ip_lookup')],
         [Markup.button.callback('📞 Поиск по номеру телефона', 'phone_lookup')],
-        [Markup.button.callback('👤 Поиск по ФИО', 'person_search')],
-        [Markup.button.callback('📸 Фото человека', 'photo_search')],
-        [Markup.button.callback('🏠 Поиск адреса', 'address_search')],
-        [Markup.button.callback('🕵️ Компромат', 'kompromat')],
+        [Markup.button.callback('👤 Поиск по ФИО', 'person_search'), Markup.button.callback('📸 Фото', 'photo_search')],
+        [Markup.button.callback('🏠 Адрес', 'address_search'), Markup.button.callback('🕵️ Компромат', 'kompromat')],
         [
             Markup.button.callback('⭐ Купить звёзды', 'buy_stars'),
             Markup.button.callback('💰 Баланс', 'show_balance'),
@@ -250,9 +250,14 @@ bot.command('stats', (ctx) => isAdmin(ctx, () => {
 function startAction(ctx, action, prompt) {
     ctx.answerCbQuery().catch(() => {});
     userStates.set(ctx.from.id, { action });
-    ctx.reply(prompt);
+    ctx.reply(prompt, { parse_mode: 'HTML' });
 }
 
+bot.action('full_dossier',   (ctx) => startAction(ctx, 'full_dossier',
+    `📋 <b>Полное досье</b>\n\nВведите ФИО человека — бот автоматически соберёт:\n` +
+    `• биографию и данные из соцсетей\n• фотографии\n• адрес\n• компромат\n\n` +
+    `💰 Стоимость: ${COSTS.full_dossier} ⭐ (вместо 60 ⭐ раздельно)`
+));
 bot.action('ip_lookup',      (ctx) => startAction(ctx, 'ip_lookup',      `🌐 Введите IP-адрес:\n(стоимость: ${COSTS.ip_lookup} ⭐)`));
 bot.action('phone_lookup',   (ctx) => startAction(ctx, 'phone_lookup',   `📞 Введите номер телефона (например, +79001234567):\n(стоимость: ${COSTS.phone_lookup} ⭐)`));
 bot.action('person_search',  (ctx) => startAction(ctx, 'person_search',  `👤 Введите ФИО для поиска:\n(стоимость: ${COSTS.person_search} ⭐)`));
@@ -371,6 +376,7 @@ bot.on('text', async (ctx) => {
             case 'photo_search':   await handlePhotoSearch(ctx, text); break;
             case 'address_search': await handleAddressSearch(ctx, text); break;
             case 'kompromat':      await handleKompromat(ctx, text); break;
+            case 'full_dossier':   await handleFullDossier(ctx, text); break;
         }
     } catch (err) {
         console.error(`Ошибка в ${state.action}:`, err.message);
@@ -391,6 +397,86 @@ async function googleSearch(query, opts = {}) {
     };
     const resp = await axios.get('https://www.searchapi.io/api/v1/search', { params, timeout: 20000 });
     return resp.data;
+}
+
+// ─── Надёжная отправка фото с несколькими fallback'ами ───────────────────────
+// Порядок попыток: прямой URL → скачать и переслать → следующий URL
+async function sendPhotoSafe(ctx, caption, ...urls) {
+    for (const url of urls) {
+        if (!url || url.startsWith('data:')) continue;
+
+        // Попытка 1: прямой URL
+        const direct = await ctx.replyWithPhoto(url, { caption, parse_mode: 'HTML' }).catch(() => null);
+        if (direct) return true;
+
+        // Попытка 2: скачать через axios и отправить как буфер
+        try {
+            const resp = await axios.get(url, {
+                responseType: 'arraybuffer',
+                timeout: 10000,
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+            });
+            const ct = resp.headers['content-type'] || '';
+            if (ct.startsWith('image/')) {
+                await ctx.replyWithPhoto(
+                    { source: Buffer.from(resp.data), filename: 'photo.jpg' },
+                    { caption, parse_mode: 'HTML' }
+                );
+                return true;
+            }
+        } catch (_) {}
+    }
+    return false;
+}
+
+// ─── Извлечение телефонов и адресов из произвольного текста ──────────────────
+function extractContactInfo(text) {
+    const phones = [
+        ...(text.match(/(?:\+7|8)[\s\-\(]?\d{3}[\s\-\)]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}/g) || []),
+        ...(text.match(/\b\d{3}[\s\-]\d{3}[\s\-]\d{2}[\s\-]\d{2}\b/g) || []),
+    ];
+    const addresses = (text.match(
+        /(?:г\.|город|ул\.|улица|пр\.|пр-т|проспект|пер\.|переулок|бул\.|бульвар|пл\.|площадь|ш\.|шоссе|д\.\s*\d+)[^,\n]{3,60}/gi
+    ) || []);
+    return {
+        phones: [...new Set(phones)].slice(0, 5),
+        addresses: [...new Set(addresses)].slice(0, 5),
+    };
+}
+
+// ─── Рендер Google Knowledge Graph (динамические поля) ───────────────────────
+// Пропускаем служебные ключи и показываем все содержательные поля
+const KG_SKIP = new Set([
+    'kgmid', 'knowledge_graph_type', 'source', 'profiles',
+    'people_also_search_for', 'people_also_search_for_link', 'images',
+]);
+const KG_FIELD_ICONS = {
+    'дата': '🎂', 'рождения': '🎂', 'место': '📍', 'смерть': '✝️',
+    'возраст': '🔢', 'дети': '👶', 'супруг': '💍', 'образование': '🎓',
+    'родител': '👪', 'должность': '💼', 'звание': '🏅', 'партия': '🏛',
+    'религия': '✝️', 'рост': '📏', 'гражданство': '🌍', 'срок': '📅',
+    'профессия': '💼', 'награды': '🏆', 'альма': '🎓', 'сайт': '🌐',
+};
+
+function renderKnowledgeGraph(kg) {
+    if (!kg || !kg.title) return null;
+
+    let lines = [`📌 <b>${kg.title}</b>`];
+    if (kg.type)        lines.push(`📂 ${kg.type}`);
+    if (kg.description) lines.push(`\n📝 ${kg.description}`);
+    lines.push('');
+
+    for (const [key, val] of Object.entries(kg)) {
+        if (KG_SKIP.has(key) || key === 'title' || key === 'type' || key === 'description') continue;
+        if (key.endsWith('_links') || key.endsWith('_link')) continue;
+        if (typeof val !== 'string') continue;
+
+        const lk = key.toLowerCase();
+        const icon = Object.entries(KG_FIELD_ICONS).find(([k]) => lk.includes(k))?.[1] || '▪️';
+        const label = key.replace(/_/g, ' ');
+        lines.push(`${icon} <b>${label}:</b> ${val}`);
+    }
+    return lines.join('\n');
 }
 
 // ─── IP Lookup ───────────────────────────────────────────────────────────────
@@ -495,99 +581,43 @@ async function handlePhoneLookup(ctx, phone) {
 
 // ─── Person Search (ФИО) ─────────────────────────────────────────────────────
 async function handlePersonSearch(ctx, query) {
-    const data = await googleSearch(query + ' ФИО биография адрес');
-    const results = data.organic_results || [];
+    const [mainData, socialData, bizData] = await Promise.all([
+        googleSearch(query + ' биография'),
+        googleSearch(`${query} site:vk.com OR site:ok.ru OR site:t.me OR site:instagram.com`),
+        googleSearch(`${query} site:rusprofile.ru OR site:zachestnyibiznes.ru OR site:focus.kontur.ru OR site:egrul.nalog.ru`),
+    ]);
 
-    if (results.length === 0) {
-        return ctx.reply(`📭 По запросу "<b>${query}</b>" ничего не найдено.`, { parse_mode: 'HTML' });
-    }
-
-    // Проверяем Knowledge Graph (если есть)
-    const kg = data.knowledge_graph;
+    // Knowledge Graph
+    const kg = mainData.knowledge_graph;
     if (kg) {
-        let kgMsg = `📌 <b>Быстрый ответ Google:</b>\n\n`;
-        kgMsg += `👤 <b>${kg.title || query}</b>\n`;
-        if (kg.type)        kgMsg += `📂 Тип: ${kg.type}\n`;
-        if (kg.description) kgMsg += `📝 ${kg.description}\n`;
-        if (kg.born)        kgMsg += `🎂 Дата рождения: ${kg.born}\n`;
-        if (kg.place_of_birth) kgMsg += `📍 Место рождения: ${kg.place_of_birth}\n`;
-        if (kg.died)        kgMsg += `✝️ Дата смерти: ${kg.died}\n`;
+        const kgText = renderKnowledgeGraph(kg);
+        if (kgText) {
+            await ctx.reply(kgText, { parse_mode: 'HTML' });
 
-        await ctx.reply(kgMsg, { parse_mode: 'HTML' });
-
-        if (kg.image) {
-            await ctx.replyWithPhoto(kg.image, { caption: kg.title || query }).catch(() => {});
+            const kgImages = kg.images || [];
+            if (kgImages.length > 0) {
+                await sendPhotoSafe(ctx, kg.title || query,
+                    kgImages[0].image, kgImages[0].image_url, kgImages[1]?.image
+                );
+            }
         }
     }
 
-    let msg = `👤 <b>Результаты поиска: ${query}</b>\n\n`;
-    results.slice(0, 6).forEach((r, i) => {
-        msg += `<b>${i + 1}. ${r.title}</b>\n`;
-        if (r.snippet) msg += `${r.snippet}\n`;
-        msg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
-    });
-
-    await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
-
-    // Дополнительный поиск по rusprofile, списки и базы
-    const dbData = await googleSearch(
-        `${query} site:rusprofile.ru OR site:zachestnyibiznes.ru OR site:kontragent.ru OR site:focus.kontur.ru`
-    );
-    const dbResults = (dbData.organic_results || []).slice(0, 3);
-    if (dbResults.length > 0) {
-        let dbMsg = `🗂 <b>Данные из деловых баз:</b>\n\n`;
-        dbResults.forEach(r => {
-            dbMsg += `• <a href="${r.link}">${r.title}</a>\n`;
-            if (r.snippet) dbMsg += `  ${r.snippet}\n`;
-            dbMsg += '\n';
-        });
-        await ctx.reply(dbMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
-    }
-}
-
-// ─── Photo Search (фотографии человека) ──────────────────────────────────────
-async function handlePhotoSearch(ctx, query) {
-    const data = await googleSearch(query + ' фото', { engine: 'google_images', num: 10 });
-    const images = data.images || [];
-
-    if (images.length === 0) {
-        return ctx.reply(`📭 Фотографии по запросу "<b>${query}</b>" не найдены.`, { parse_mode: 'HTML' });
+    // Основные результаты + извлечение контактов из сниппетов
+    const results = mainData.organic_results || [];
+    if (results.length === 0 && !kg) {
+        return ctx.reply(`📭 По запросу "<b>${query}</b>" ничего не найдено.`, { parse_mode: 'HTML' });
     }
 
-    await ctx.reply(`📸 <b>Фотографии: ${query}</b>\nПоказываю первые 5 результатов:`, { parse_mode: 'HTML' });
+    if (results.length > 0) {
+        const allSnippets = results.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+        const contacts = extractContactInfo(allSnippets);
 
-    let sent = 0;
-    for (const img of images) {
-        if (sent >= 5) break;
-        const photoUrl = img.original?.link || img.thumbnail;
-        if (!photoUrl) continue;
+        let msg = `👤 <b>Поиск по ФИО: ${query}</b>\n`;
+        if (contacts.phones.length)    msg += `\n📞 Телефоны в результатах: ${contacts.phones.join(', ')}`;
+        if (contacts.addresses.length) msg += `\n📍 Адреса в результатах: ${contacts.addresses.join(' | ')}`;
+        msg += '\n\n';
 
-        const caption = `📸 ${img.title || query}\n🔗 ${img.source?.name || ''}`;
-        const ok = await ctx.replyWithPhoto(photoUrl, { caption }).catch(() => false);
-        if (ok !== false) sent++;
-    }
-
-    if (sent === 0) {
-        await ctx.reply('❌ Не удалось загрузить фотографии. Попробуйте другой запрос.');
-    }
-}
-
-// ─── Address Search (точный адрес) ───────────────────────────────────────────
-async function handleAddressSearch(ctx, query) {
-    // Поиск адреса через Google
-    const data = await googleSearch(`${query} адрес проживания место жительства`);
-    const results = data.organic_results || [];
-
-    let msg = `🏠 <b>Поиск адреса: ${query}</b>\n\n`;
-
-    const kg = data.knowledge_graph;
-    if (kg && (kg.address || kg.headquarters || kg.location)) {
-        msg += `📍 <b>Адрес из Google:</b>\n${kg.address || kg.headquarters || kg.location}\n\n`;
-    }
-
-    if (results.length === 0) {
-        await ctx.reply(msg + '📭 Адрес в открытых источниках не найден.', { parse_mode: 'HTML' });
-    } else {
         results.slice(0, 5).forEach((r, i) => {
             msg += `<b>${i + 1}. ${r.title}</b>\n`;
             if (r.snippet) msg += `${r.snippet}\n`;
@@ -596,26 +626,127 @@ async function handleAddressSearch(ctx, query) {
         await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
     }
 
-    // Поиск в ФССП и судебных базах
-    const judicialData = await googleSearch(
-        `${query} адрес регистрации site:fssp.gov.ru OR site:sudact.ru OR site:reestr-zalogov.ru OR site:egrul.nalog.ru`
-    );
-    const jResults = (judicialData.organic_results || []).slice(0, 3);
-
-    if (jResults.length > 0) {
-        let jMsg = `⚖️ <b>Официальные источники:</b>\n\n`;
-        jResults.forEach(r => {
-            jMsg += `• <a href="${r.link}">${r.title}</a>\n`;
-            if (r.snippet) jMsg += `  ${r.snippet}\n\n`;
+    // Социальные сети
+    const socialResults = socialData.organic_results || [];
+    if (socialResults.length > 0) {
+        let smMsg = `📱 <b>Профили в социальных сетях:</b>\n\n`;
+        socialResults.slice(0, 5).forEach(r => {
+            const network = r.domain?.includes('vk.com') ? '🔵 ВКонтакте' :
+                            r.domain?.includes('ok.ru')  ? '🟠 Одноклассники' :
+                            r.domain?.includes('t.me')   ? '✈️ Telegram' :
+                            r.domain?.includes('instagram') ? '📷 Instagram' : '🌐';
+            smMsg += `${network}: <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) smMsg += `  ${r.snippet}\n`;
+            smMsg += '\n';
         });
-        await ctx.reply(jMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+        await ctx.reply(smMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
     }
 
-    // Ссылки на ключевые базы данных
+    // Деловые базы
+    const bizResults = bizData.organic_results || [];
+    if (bizResults.length > 0) {
+        let bizMsg = `🏢 <b>Деловые базы и реестры:</b>\n\n`;
+        bizResults.slice(0, 4).forEach(r => {
+            bizMsg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) bizMsg += `  ${r.snippet}\n\n`;
+        });
+        await ctx.reply(bizMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+}
+
+// ─── Photo Search (фотографии человека) ──────────────────────────────────────
+async function handlePhotoSearch(ctx, query) {
+    const data = await googleSearch(query, { engine: 'google_images', num: 20 });
+    const images = data.images || [];
+
+    if (images.length === 0) {
+        return ctx.reply(`📭 Фотографии по запросу "<b>${query}</b>" не найдены.`, { parse_mode: 'HTML' });
+    }
+
+    await ctx.reply(`📸 <b>Фотографии: ${query}</b>`, { parse_mode: 'HTML' });
+
+    let sent = 0;
+    for (const img of images) {
+        if (sent >= 6) break;
+
+        // Thumbnail (encrypted-tbn0.gstatic.com) работает надёжнее оригинала
+        const thumb    = typeof img.thumbnail === 'string' && !img.thumbnail.startsWith('data:') ? img.thumbnail : null;
+        const original = img.original?.link;
+        const caption  = `📸 ${img.title || query}${img.source?.name ? '\n🔗 ' + img.source.name : ''}`;
+
+        // Приоритет: thumbnail → original (скачать)
+        const ok = await sendPhotoSafe(ctx, caption, thumb, original);
+        if (ok) sent++;
+    }
+
+    if (sent === 0) {
+        await ctx.reply('❌ Не удалось загрузить фотографии. Попробуйте уточнить запрос (добавьте город или профессию).');
+    } else {
+        await ctx.reply(`✅ Отправлено фотографий: ${sent}`);
+    }
+}
+
+// ─── Address Search (точный адрес) ───────────────────────────────────────────
+async function handleAddressSearch(ctx, query) {
+    const [mainData, officialData] = await Promise.all([
+        googleSearch(`"${query}" адрес проживания регистрации`),
+        googleSearch(`"${query}" site:fssp.gov.ru OR site:egrul.nalog.ru OR site:rusprofile.ru OR site:sudact.ru OR site:kad.arbitr.ru`),
+    ]);
+
+    const results = mainData.organic_results || [];
+    const allText = results.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+    const contacts = extractContactInfo(allText);
+
+    let msg = `🏠 <b>Поиск адреса: ${query}</b>\n\n`;
+
+    // Адреса извлечённые из сниппетов
+    if (contacts.addresses.length > 0) {
+        msg += `📍 <b>Найденные адреса:</b>\n`;
+        contacts.addresses.forEach(a => { msg += `  • ${a.trim()}\n`; });
+        msg += '\n';
+    }
+    if (contacts.phones.length > 0) {
+        msg += `📞 <b>Телефоны:</b> ${contacts.phones.join(', ')}\n\n`;
+    }
+
+    // Knowledge Graph адрес
+    const kg = mainData.knowledge_graph;
+    if (kg) {
+        const addrField = kg.address || kg.headquarters || kg.location || kg['Адрес'] || kg['Местонахождение'];
+        if (addrField) msg += `🗂 <b>Адрес из Google Knowledge Graph:</b>\n${addrField}\n\n`;
+    }
+
+    if (results.length > 0) {
+        results.slice(0, 5).forEach((r, i) => {
+            msg += `<b>${i + 1}. ${r.title}</b>\n`;
+            if (r.snippet) msg += `${r.snippet}\n`;
+            msg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
+        });
+    } else {
+        msg += '📭 Адрес в открытых источниках не найден.\n\n';
+    }
+
+    await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+
+    // Официальные базы
+    const offResults = officialData.organic_results || [];
+    if (offResults.length > 0) {
+        let offMsg = `⚖️ <b>Официальные базы данных:</b>\n\n`;
+        offResults.slice(0, 4).forEach(r => {
+            const snippetContacts = extractContactInfo(`${r.title} ${r.snippet || ''}`);
+            offMsg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) offMsg += `  ${r.snippet}\n`;
+            if (snippetContacts.addresses.length) offMsg += `  📍 ${snippetContacts.addresses[0]}\n`;
+            offMsg += '\n';
+        });
+        await ctx.reply(offMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Прямые ссылки для самостоятельного поиска
     const enc = encodeURIComponent(query);
     await ctx.reply(
-        `🔎 <b>Поищите вручную в базах данных:</b>\n\n` +
-        `📋 <a href="https://egrul.nalog.ru/index.html">ЕГРЮЛ/ЕГРИП — ФНС</a>\n` +
+        `🔎 <b>Проверьте вручную:</b>\n\n` +
+        `📋 <a href="https://egrul.nalog.ru/index.html">ЕГРЮЛ/ЕГРИП (ФНС)</a>\n` +
         `💰 <a href="https://fssp.gov.ru/iss/ip/?territory=0&predmet=0&name=${enc}">ФССП — исполнительные производства</a>\n` +
         `🏛 <a href="https://kad.arbitr.ru/?ins[0]=${enc}">Картотека арбитражных дел</a>\n` +
         `⚖️ <a href="https://sudact.ru/search/?query=${enc}">ГАС Правосудие</a>\n` +
@@ -626,34 +757,34 @@ async function handleAddressSearch(ctx, query) {
 
 // ─── Kompromat ────────────────────────────────────────────────────────────────
 async function handleKompromat(ctx, query) {
-    await ctx.reply(`🕵️ <b>Сбор компромата на: ${query}</b>\n\nАнализирую несколько источников...`, { parse_mode: 'HTML' });
+    await ctx.reply(
+        `🕵️ <b>Сбор компромата: ${query}</b>\n\nЗапрашиваю параллельно несколько источников...`,
+        { parse_mode: 'HTML' }
+    );
+
+    const [newsData, courtData, debtData] = await Promise.all([
+        googleSearch(`"${query}" суд арест обвинение скандал мошенничество уголовное`, { engine: 'google_news', num: 8 }),
+        googleSearch(`"${query}" приговор суд уголовное дело осуждён виновен`, { num: 6 }),
+        googleSearch(`"${query}" банкротство долги исполнительное производство ФССП`, { num: 5 }),
+    ]);
 
     // 1. Новости
-    const newsData = await googleSearch(`${query} суд арест обвинение скандал мошенничество`, {
-        engine: 'google_news', num: 5
-    });
     const news = newsData.organic_results || [];
-
     if (news.length > 0) {
         let newsMsg = `📰 <b>Новости и скандалы:</b>\n\n`;
         news.slice(0, 5).forEach((n, i) => {
             newsMsg += `<b>${i + 1}. ${n.title}</b>\n`;
             if (n.date)    newsMsg += `📅 ${n.date}\n`;
             if (n.snippet) newsMsg += `${n.snippet}\n`;
-            newsMsg += `🔗 <a href="${n.link}">${n.source || n.link}</a>\n\n`;
+            newsMsg += `🔗 <a href="${n.link}">${n.source || n.domain || n.link}</a>\n\n`;
         });
         await ctx.reply(newsMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
     } else {
-        await ctx.reply('📰 Новостей по данному запросу не найдено.');
+        await ctx.reply('📰 Публичных новостей о судах/арестах не найдено.');
     }
 
-    // 2. Судимости и судебные дела
-    const courtData = await googleSearch(
-        `${query} приговор суд уголовное дело`,
-        { num: 5 }
-    );
+    // 2. Судебные дела
     const courtResults = courtData.organic_results || [];
-
     if (courtResults.length > 0) {
         let courtMsg = `⚖️ <b>Судебные дела:</b>\n\n`;
         courtResults.slice(0, 4).forEach((r, i) => {
@@ -665,12 +796,7 @@ async function handleKompromat(ctx, query) {
     }
 
     // 3. Долги и банкротство
-    const debtData = await googleSearch(
-        `${query} банкротство долги исполнительное производство`,
-        { num: 5 }
-    );
     const debtResults = debtData.organic_results || [];
-
     if (debtResults.length > 0) {
         let debtMsg = `💸 <b>Долги и банкротство:</b>\n\n`;
         debtResults.slice(0, 3).forEach((r, i) => {
@@ -681,18 +807,46 @@ async function handleKompromat(ctx, query) {
         await ctx.reply(debtMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
     }
 
-    // 4. Ссылки на официальные базы
+    // 4. Прямые ссылки
     const enc = encodeURIComponent(query);
     await ctx.reply(
         `🗂 <b>Проверьте в официальных базах:</b>\n\n` +
         `💰 <a href="https://fssp.gov.ru/iss/ip/?territory=0&predmet=0&name=${enc}">ФССП — долги и приставы</a>\n` +
         `⚖️ <a href="https://sudact.ru/search/?query=${enc}">ГАС Правосудие — решения судов</a>\n` +
         `🏛 <a href="https://kad.arbitr.ru/?ins[0]=${enc}">Картотека арбитражных дел</a>\n` +
-        `📑 <a href="https://bankrot.fedresurs.ru/bankrupts?searchStr=${enc}">Реестр банкротств</a>\n` +
-        `🔎 <a href="https://www.google.com/search?q=${enc}+%D0%BA%D0%BE%D0%BC%D0%BF%D1%80%D0%BE%D0%BC%D0%B0%D1%82">Google: "${query} компромат"</a>\n` +
-        `📰 <a href="https://yandex.ru/news/search?text=${enc}+%D0%B0%D1%80%D0%B5%D1%81%D1%82+%D1%81%D1%83%D0%B4">Яндекс.Новости</a>`,
+        `📑 <a href="https://bankrot.fedresurs.ru/bankrupts?searchStr=${enc}">Реестр банкротств (Федресурс)</a>\n` +
+        `🔍 <a href="https://www.google.com/search?q=${enc}+%D0%BA%D0%BE%D0%BC%D0%BF%D1%80%D0%BE%D0%BC%D0%B0%D1%82">Google: "${query} компромат"</a>\n` +
+        `📰 <a href="https://yandex.ru/news/search?text=${enc}">Яндекс.Новости</a>`,
         { parse_mode: 'HTML', disable_web_page_preview: true }
     );
+}
+
+// ─── Полное досье (все 4 поиска в одном) ─────────────────────────────────────
+async function handleFullDossier(ctx, query) {
+    await ctx.reply(
+        `📋 <b>Полное досье: ${query}</b>\n\n` +
+        '━━━━━━━━━━━━━━━━━━━━━━\n' +
+        '1️⃣ ФИО и биография\n' +
+        '2️⃣ Фотографии\n' +
+        '3️⃣ Адрес\n' +
+        '4️⃣ Компромат\n' +
+        '━━━━━━━━━━━━━━━━━━━━━━',
+        { parse_mode: 'HTML' }
+    );
+
+    await ctx.reply('━━━ 1️⃣ ФИО И БИОГРАФИЯ ━━━');
+    await handlePersonSearch(ctx, query);
+
+    await ctx.reply('━━━ 2️⃣ ФОТОГРАФИИ ━━━');
+    await handlePhotoSearch(ctx, query);
+
+    await ctx.reply('━━━ 3️⃣ АДРЕС ━━━');
+    await handleAddressSearch(ctx, query);
+
+    await ctx.reply('━━━ 4️⃣ КОМПРОМАТ ━━━');
+    await handleKompromat(ctx, query);
+
+    await ctx.reply('✅ <b>Досье собрано.</b>', { parse_mode: 'HTML', ...mainMenuKeyboard() });
 }
 
 // ─── Запуск ───────────────────────────────────────────────────────────────────
