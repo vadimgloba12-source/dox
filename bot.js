@@ -578,8 +578,10 @@ bot.on('text', async (ctx) => {
 });
 
 // ─── Google Search ────────────────────────────────────────────────────────────
+const GOOGLE_CX = process.env.GOOGLE_CX; // Custom Search Engine ID (опционально)
+
 async function googleSearch(query, opts = {}) {
-    const cacheKey = `gs_${opts.engine || 'g'}_${query}`;
+    const cacheKey = `gs_${opts.engine || 'g'}_${opts.cx ? 'cx' : ''}_${query}`;
     const cached   = searchCache.get(cacheKey);
     if (cached) return cached;
 
@@ -591,9 +593,32 @@ async function googleSearch(query, opts = {}) {
         num: opts.num || 10,
         api_key: SEARCHAPI_KEY,
     };
+    // Использовать Custom Search Engine если указан
+    if (opts.cx && GOOGLE_CX) params.cx = GOOGLE_CX;
+
     const resp = await axios.get('https://www.searchapi.io/api/v1/search', { params, timeout: 20000 });
     searchCache.set(cacheKey, resp.data);
     return resp.data;
+}
+
+// Расширенный поиск: объединяет обычный Google + CX для большего охвата источников
+async function googleSearchExtended(query, opts = {}) {
+    const [regular, cx] = await Promise.allSettled([
+        googleSearch(query, opts),
+        GOOGLE_CX ? googleSearch(query, { ...opts, cx: true }) : Promise.resolve({ organic_results: [] }),
+    ]);
+
+    const mainResults = regular.status === 'fulfilled' ? regular.value : { organic_results: [] };
+    const cxResults   = cx.status === 'fulfilled' ? cx.value : { organic_results: [] };
+
+    // Объединить результаты, убрать дубли по URL
+    const seen = new Set();
+    const merged = [];
+    for (const r of [...(mainResults.organic_results || []), ...(cxResults.organic_results || [])]) {
+        if (!seen.has(r.link)) { seen.add(r.link); merged.push(r); }
+    }
+
+    return { ...mainResults, organic_results: merged };
 }
 
 // ─── Safe photo send ──────────────────────────────────────────────────────────
@@ -800,7 +825,7 @@ async function handlePhoneLookup(ctx, phone) {
 // ─── Person Search ────────────────────────────────────────────────────────────
 async function handlePersonSearch(ctx, query) {
     const [mainData, socialData, bizData] = await Promise.all([
-        googleSearch(`"${query}" биография`),
+        googleSearchExtended(`"${query}" биография`),
         googleSearch(`"${query}" site:vk.com OR site:ok.ru OR site:t.me OR site:instagram.com OR site:twitter.com OR site:linkedin.com`),
         googleSearch(`"${query}" site:rusprofile.ru OR site:zachestnyibiznes.ru OR site:focus.kontur.ru OR site:egrul.nalog.ru OR site:list-org.com`),
     ]);
@@ -904,7 +929,7 @@ async function handlePhotoSearch(ctx, query) {
 // ─── Address Search ───────────────────────────────────────────────────────────
 async function handleAddressSearch(ctx, query) {
     const [mainData, offData] = await Promise.all([
-        googleSearch(`"${query}" адрес проживания регистрации`),
+        googleSearchExtended(`"${query}" адрес проживания регистрации`),
         googleSearch(`"${query}" site:fssp.gov.ru OR site:egrul.nalog.ru OR site:rusprofile.ru OR site:sudact.ru`),
     ]);
 
