@@ -5,10 +5,168 @@
  */
 
 const { Telegraf, Markup } = require('telegraf');
-const axios  = require('axios');
-const NodeCache = require('node-cache');
-const sqlite3   = require('sqlite3').verbose();
+const axios       = require('axios');
+const NodeCache   = require('node-cache');
+const sqlite3     = require('sqlite3').verbose();
+const { spawn }   = require('child_process');
 require('dotenv').config();
+
+// ─── SpiderFoot ───────────────────────────────────────────────────────────────
+const SF_HOST = '127.0.0.1';
+const SF_PORT = 5001;
+const SF_BASE = `http://${SF_HOST}:${SF_PORT}`;
+let   sfAvailable = false;
+
+async function startSpiderFoot() {
+    // Проверяем, уже запущен ли
+    try {
+        await axios.get(`${SF_BASE}/ping`, { timeout: 2000 });
+        sfAvailable = true;
+        console.log('✅ SpiderFoot уже запущен');
+        return;
+    } catch (_) {}
+
+    console.log('🕷 Запускаю SpiderFoot...');
+    const sf = spawn('python3', ['/tmp/spiderfoot/sf.py', '-l', `${SF_HOST}:${SF_PORT}`, '-d'], {
+        detached: true, stdio: 'ignore',
+    });
+    sf.unref();
+
+    // Ждём запуска (до 30 сек)
+    for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+            await axios.get(`${SF_BASE}/ping`, { timeout: 1500 });
+            sfAvailable = true;
+            console.log('✅ SpiderFoot запущен');
+            return;
+        } catch (_) {}
+    }
+    console.error('❌ SpiderFoot не ответил за 30 сек');
+}
+
+// Определить тип цели для SpiderFoot
+function detectTargetType(target) {
+    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(target))     return 'IP_ADDRESS';
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(target))  return 'EMAILADDR';
+    if (/^[\+7-8][\d\s\-\(\)]{9,15}$/.test(target)) return 'PHONE_NUMBER';
+    if (/^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$/.test(target)) return 'INTERNET_NAME';
+    return 'USERNAME';
+}
+
+// Модули по типу цели (только бесплатные, без API-ключей)
+const SF_MODULES = {
+    IP_ADDRESS:    'sfp_whois,sfp_dnsresolve,sfp_ipinfo,sfp_dnsneighbor,sfp_company,sfp_countryname',
+    INTERNET_NAME: 'sfp_whois,sfp_dnsresolve,sfp_dnsraw,sfp_crt,sfp_email,sfp_emailformat,sfp_bingsearch,sfp_googlemaps,sfp_company,sfp_github,sfp_hashes',
+    EMAILADDR:     'sfp_emailformat,sfp_gravatar,sfp_pgp,sfp_bingsearch,sfp_github,sfp_accounts',
+    USERNAME:      'sfp_accounts,sfp_github,sfp_bingsearch,sfp_socialprofiles',
+    PHONE_NUMBER:  'sfp_phone,sfp_bingsearch,sfp_googlemaps',
+};
+
+// Запустить сканирование и дождаться результатов
+async function runSFScan(target, maxSecs = 90) {
+    const targetType = detectTargetType(target);
+    const modules    = SF_MODULES[targetType] || SF_MODULES.USERNAME;
+    const scanName   = `bot_${Date.now()}`;
+
+    const form = new URLSearchParams({
+        scanname: scanName, scantarget: target,
+        typelist: targetType, modulelist: modules, usecase: 'all',
+    });
+
+    await axios.post(`${SF_BASE}/startscan`, form.toString(), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        maxRedirects: 5, validateStatus: s => s < 500,
+    });
+
+    // Находим ID свежесозданного скана
+    await new Promise(r => setTimeout(r, 1000));
+    const list   = await axios.get(`${SF_BASE}/scanlist`);
+    const scan   = list.data.find(s => s[1] === scanName);
+    if (!scan) throw new Error('Scan not found in list');
+    const scanId = scan[0];
+
+    // Ждём завершения
+    const deadline = Date.now() + maxSecs * 1000;
+    while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 5000));
+        const st = await axios.get(`${SF_BASE}/scanstatus/${scanId}`);
+        const status = st.data[5] || st.data[6];
+        if (['FINISHED', 'ERROR', 'ABORTED'].includes(status)) break;
+    }
+
+    // Получаем результаты
+    const res = await axios.get(`${SF_BASE}/scaneventresults/${scanId}/ALL`);
+    return { scanId, targetType, results: res.data };
+}
+
+// Иконки для типов событий SpiderFoot
+const SF_ICONS = {
+    EMAILADDR:                        '📧',
+    PHONE_NUMBER:                     '📞',
+    INTERNET_NAME:                    '🌐',
+    IP_ADDRESS:                       '🌍',
+    IPV6_ADDRESS:                     '🌍',
+    ACCOUNT_EXTERNAL_OWNED:           '👤',
+    ACCOUNT_EXTERNAL_OWNED_COMPROMISED: '🔓',
+    PHYSICAL_ADDRESS:                 '📍',
+    HUMAN_NAME:                       '👤',
+    COMPANY_NAME:                     '🏢',
+    AFFILIATE_EMAILADDR:              '📧',
+    DOMAIN_WHOIS:                     '📋',
+    DOMAIN_REGISTRAR:                 '🏢',
+    USERNAME:                         '👾',
+    URL_STATIC:                       '🔗',
+    URL_FORM:                         '📝',
+    SOCIAL_MEDIA:                     '📱',
+    GEOINFO:                          '🗺',
+    SSL_CERTIFICATE_ISSUED:           '🔒',
+    WEB_ANALYTICS_ID:                 '📊',
+    SOFTWARE_USED:                    '💾',
+    TCP_PORT_OPEN:                    '🔌',
+    TCP_PORT_OPEN_BANNER:             '🔌',
+    VULNERABILITY_CVE_HIGH:           '🚨',
+    VULNERABILITY_CVE_CRITICAL:       '🚨',
+    LEAKSITE_CONTENT:                 '🔓',
+    DARKWEB_MENTION:                  '🌑',
+    PGP_KEY:                          '🔑',
+    HASH:                             '#️⃣',
+    PROVIDER_MAIL:                    '📮',
+    PROVIDER_DNS:                     '🖥',
+};
+
+// Группировать и форматировать результаты SpiderFoot
+function formatSFResults(results, targetType) {
+    const important = [
+        'ACCOUNT_EXTERNAL_OWNED','ACCOUNT_EXTERNAL_OWNED_COMPROMISED',
+        'EMAILADDR','PHONE_NUMBER','PHYSICAL_ADDRESS','HUMAN_NAME',
+        'COMPANY_NAME','DOMAIN_WHOIS','SOCIAL_MEDIA','USERNAME',
+        'PGP_KEY','LEAKSITE_CONTENT','DARKWEB_MENTION',
+        'VULNERABILITY_CVE_HIGH','VULNERABILITY_CVE_CRITICAL',
+        'TCP_PORT_OPEN','WEB_ANALYTICS_ID','SSL_CERTIFICATE_ISSUED',
+        'IP_ADDRESS','INTERNET_NAME','GEOINFO','AFFILIATE_EMAILADDR',
+    ];
+
+    const groups = {};
+    for (const r of results) {
+        const type = r[10] || r[r.length - 1];
+        if (!important.includes(type)) continue;
+        if (!groups[type]) groups[type] = new Set();
+        const val = r[1];
+        if (val && val.length < 300) groups[type].add(val.trim());
+    }
+
+    const parts = [];
+    for (const type of important) {
+        const vals = groups[type];
+        if (!vals || vals.size === 0) continue;
+        const icon  = SF_ICONS[type] || '▪️';
+        const label = type.replace(/_/g, ' ');
+        const items = [...vals].slice(0, 8).map(v => `  • ${v.slice(0, 120)}`).join('\n');
+        parts.push(`${icon} <b>${label}:</b>\n${items}`);
+    }
+    return parts;
+}
 
 // ─── Database ────────────────────────────────────────────────────────────────
 const db = new sqlite3.Database('./database.sqlite');
@@ -66,6 +224,7 @@ const COSTS = {
     car_lookup:      15,  // Пробив авто по гос.номеру
     connections:     20,  // Связи и окружение человека
     doc_search:      20,  // Поиск по документам / паспорту
+    spiderfoot:      30,  // глубокое автосканирование SpiderFoot (230 модулей)
     full_dossier:    45,  // всё сразу (экономия 35⭐)
 };
 
@@ -172,6 +331,7 @@ function mainMenuKeyboard() {
             Markup.button.callback('🔗 Связи/окружение', 'connections'),
             Markup.button.callback('📄 Документы',        'doc_search'),
         ],
+        [Markup.button.callback('🕷 SpiderFoot — глубокий скан', 'spiderfoot')],
         [
             Markup.button.callback('⭐ Купить звёзды', 'buy_stars'),
             Markup.button.callback('💰 Баланс',        'show_balance'),
@@ -395,6 +555,7 @@ const ACTION_PROMPTS = {
     connections:     `🔗 <b>Связи и окружение</b>\n\nВведите <b>ФИО</b> — найдём семью, коллег, партнёров:\nПример: <code>Иванов Иван Иванович</code>\n\n💰 Стоимость: ${COSTS.connections} ⭐`,
     doc_search:      `📄 <b>Поиск по документам</b>\n\nВведите номер паспорта, ИНН, СНИЛС или ФИО:\nПример: <code>4510 123456</code> или <code>500110474504</code>\n\n💰 Стоимость: ${COSTS.doc_search} ⭐`,
     reverse_image:   `📷 <b>Поиск личности по фото</b>\n\nОтправьте <b>фотографию</b> — бот определит кто на ней через Google Lens и найдёт все упоминания в сети.\n\n💰 Стоимость: ${COSTS.reverse_image} ⭐`,
+    spiderfoot:      `🕷 <b>SpiderFoot — глубокий автоматический скан</b>\n\n230 OSINT-модулей. Поддерживаемые цели:\n• <code>IP-адрес</code> — хосты, порты, угрозы, WHOIS\n• <code>domain.com</code> — DNS, SSL, email, субдомены\n• <code>email@mail.ru</code> — аккаунты, утечки, PGP\n• <code>@username</code> — 500+ соцсетей, GitHub, форумы\n• <code>+79001234567</code> — телефон, геолокация\n\nВремя скана: 30–90 сек.\n💰 Стоимость: ${COSTS.spiderfoot} ⭐`,
 };
 
 Object.keys(ACTION_PROMPTS).forEach(action => {
@@ -656,6 +817,7 @@ bot.on('text', async (ctx) => {
                 await ctx.reply('📷 Пожалуйста, отправьте <b>фотографию</b> (не файл, а именно фото).', { parse_mode: 'HTML' });
                 userStates.set(userId, { action: 'reverse_image' }); // восстановить состояние
                 return;
+            case 'spiderfoot':      await handleSpiderFoot(ctx, text);     break;
             case 'full_dossier':    await handleFullDossier(ctx, text);    break;
         }
     } catch (err) {
@@ -1751,6 +1913,111 @@ async function handleDocSearch(ctx, query) {
     );
 }
 
+// ─── SpiderFoot Scan ──────────────────────────────────────────────────────────
+async function handleSpiderFoot(ctx, target) {
+    if (!sfAvailable) {
+        await ctx.reply('⏳ SpiderFoot запускается, подождите 30 сек и попробуйте снова...');
+        await startSpiderFoot();
+        if (!sfAvailable) return ctx.reply('❌ SpiderFoot недоступен. Попробуйте позже.');
+    }
+
+    const targetType = detectTargetType(target.replace(/^@/, ''));
+    const typeLabel  = { IP_ADDRESS: '🌍 IP', INTERNET_NAME: '🌐 Домен', EMAILADDR: '📧 Email',
+                         USERNAME: '👾 Username', PHONE_NUMBER: '📞 Телефон' }[targetType] || '🔍';
+
+    const statusMsg = await ctx.reply(
+        `🕷 <b>SpiderFoot: ${target}</b>\n` +
+        `${typeLabel} · Тип цели определён\n\n` +
+        `⏳ Запускаю 230 OSINT-модулей...\n` +
+        `<i>Это займёт 30–90 секунд</i>`,
+        { parse_mode: 'HTML' }
+    );
+
+    // Прогресс-апдейты пока сканирует
+    const progressInterval = setInterval(async () => {
+        try {
+            const list = await axios.get(`${SF_BASE}/scanlist`);
+            const running = list.data.filter(s => s[6] === 'RUNNING');
+            if (running.length > 0) {
+                const count = running[0][7] || 0;
+                await ctx.telegram.editMessageText(
+                    ctx.chat.id, statusMsg.message_id, undefined,
+                    `🕷 <b>SpiderFoot: ${target}</b>\n${typeLabel}\n\n🔄 Сканирую... Найдено: <b>${count}</b> объектов`,
+                    { parse_mode: 'HTML' }
+                ).catch(() => {});
+            }
+        } catch (_) {}
+    }, 10000);
+
+    try {
+        const cleanTarget = target.replace(/^@/, '');
+        const { results, targetType: tt } = await runSFScan(cleanTarget, 90);
+
+        clearInterval(progressInterval);
+
+        if (!results || results.length === 0) {
+            await ctx.telegram.editMessageText(
+                ctx.chat.id, statusMsg.message_id, undefined,
+                `🕷 <b>SpiderFoot: ${target}</b>\n\n📭 Результатов не найдено.`,
+                { parse_mode: 'HTML' }
+            ).catch(() => {});
+            return;
+        }
+
+        // Финальная сводка
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, statusMsg.message_id, undefined,
+            `🕷 <b>SpiderFoot: ${target}</b>\n${typeLabel}\n\n✅ Сканирование завершено\n📊 Найдено объектов: <b>${results.length}</b>`,
+            { parse_mode: 'HTML' }
+        ).catch(() => {});
+
+        // Форматируем и отправляем результаты по блокам
+        const parts = formatSFResults(results, tt);
+
+        if (parts.length === 0) {
+            // Нет важных типов — показываем статистику по всем типам
+            const types = {};
+            for (const r of results) {
+                const t = r[10] || r[r.length - 1];
+                types[t] = (types[t] || 0) + 1;
+            }
+            let statMsg = `📊 <b>Статистика скана:</b>\n\n`;
+            Object.entries(types).sort((a,b) => b[1]-a[1]).slice(0,20).forEach(([t,c]) => {
+                statMsg += `${SF_ICONS[t] || '▪️'} ${t}: <b>${c}</b>\n`;
+            });
+            await ctx.reply(statMsg, { parse_mode: 'HTML' });
+        } else {
+            // Разбиваем на сообщения по 4096 символов
+            let chunk = `🕷 <b>SpiderFoot результаты: ${target}</b>\n\n`;
+            for (const part of parts) {
+                if ((chunk + part + '\n\n').length > 4000) {
+                    await ctx.reply(chunk, { parse_mode: 'HTML', disable_web_page_preview: true });
+                    chunk = '';
+                }
+                chunk += part + '\n\n';
+            }
+            if (chunk.trim()) {
+                await ctx.reply(chunk, { parse_mode: 'HTML', disable_web_page_preview: true });
+            }
+        }
+
+        // Статистика
+        const types = {};
+        for (const r of results) { const t = r[10]||r[r.length-1]; types[t]=(types[t]||0)+1; }
+        const topTypes = Object.entries(types).sort((a,b)=>b[1]-a[1]).slice(0,8)
+            .map(([t,c]) => `${SF_ICONS[t]||'▪️'} ${t}: ${c}`).join('\n');
+        await ctx.reply(
+            `📈 <b>Итого найдено: ${results.length} объектов</b>\n\n${topTypes}`,
+            { parse_mode: 'HTML' }
+        );
+
+    } catch (err) {
+        clearInterval(progressInterval);
+        console.error('[spiderfoot] error:', err.message);
+        await ctx.reply('❌ Ошибка SpiderFoot: ' + err.message);
+    }
+}
+
 // ─── Full Dossier ─────────────────────────────────────────────────────────────
 async function handleFullDossier(ctx, query) {
     await ctx.reply(
@@ -1783,10 +2050,12 @@ async function handleFullDossier(ctx, query) {
 }
 
 // ─── Launch ───────────────────────────────────────────────────────────────────
-// В Telegraf v4 bot.launch() не резолвится до остановки — логируем сразу
 console.log('🚀 Запуск OSINT Dox Bot...');
 bot.launch();
 console.log('✅ Бот запущен и принимает сообщения');
+
+// SpiderFoot — запускаем в фоне, не блокируем старт бота
+startSpiderFoot().catch(e => console.error('SpiderFoot start error:', e.message));
 
 // Инициализация первого админа
 db.get('SELECT COUNT(*) AS c FROM admins', (err, row) => {
