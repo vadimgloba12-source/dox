@@ -356,10 +356,12 @@ function mainMenuKeyboard() {
 
 function adminMenuKeyboard() {
     return Markup.inlineKeyboard([
-        [Markup.button.callback('📋 Ожидающие', 'adm_pending')],
-        [Markup.button.callback('👥 Все пользователи', 'adm_users')],
-        [Markup.button.callback('📊 Статистика', 'adm_stats')],
-        [Markup.button.callback('📢 Рассылка', 'adm_broadcast')],
+        [Markup.button.callback('📋 Ожидающие',          'adm_pending')],
+        [Markup.button.callback('👥 Пользователи',        'adm_users')],
+        [Markup.button.callback('👮 Администраторы',      'adm_admins')],
+        [Markup.button.callback('➕ Назначить админа',    'adm_make_admin')],
+        [Markup.button.callback('📊 Статистика',          'adm_stats')],
+        [Markup.button.callback('📢 Рассылка',            'adm_broadcast')],
     ]);
 }
 
@@ -521,6 +523,72 @@ bot.command('add_stars', (ctx) => isAdmin(ctx, () => {
         if (err || this.changes === 0) return ctx.reply('Пользователь не найден.');
         ctx.reply(`✅ Начислено ${amount} ⭐ пользователю ${id}.`);
         bot.telegram.sendMessage(parseInt(id), `⭐ Вам начислено <b>${amount}</b> звёзд!`, { parse_mode: 'HTML' }).catch(() => {});
+    });
+}));
+
+// Назначить администратора
+bot.command('make_admin', (ctx) => isAdmin(ctx, () => {
+    const args = ctx.message.text.split(' ');
+    const id   = parseInt(args[1]);
+    if (!id) return ctx.reply('Использование: /make_admin <telegram_id>');
+
+    // Проверяем что пользователь существует
+    db.get('SELECT * FROM users WHERE telegram_id = ?', [id], (err, user) => {
+        if (err || !user) return ctx.reply('❌ Пользователь не найден в базе.');
+
+        db.run(
+            'INSERT OR REPLACE INTO admins (telegram_id, is_super) VALUES (?, 0)',
+            [id],
+            (err) => {
+                if (err) return ctx.reply('Ошибка БД.');
+                // Убедиться что он подтверждён
+                db.run('UPDATE users SET allowed = 1 WHERE telegram_id = ?', [id]);
+
+                const name = user.phone || id;
+                ctx.reply(`✅ Пользователь <code>${id}</code> (${name}) назначен администратором.`, { parse_mode: 'HTML' });
+
+                bot.telegram.sendMessage(id,
+                    '🔐 <b>Вам выданы права администратора!</b>\n\nТеперь доступны:\n/admin — панель управления\n/make_admin — назначать других админов\n/remove_admin — снимать права\n/broadcast — рассылка',
+                    { parse_mode: 'HTML', ...adminMenuKeyboard() }
+                ).catch(() => {});
+
+                // Уведомить всех остальных супер-админов
+                notifyAdmins(`🔐 Пользователь <code>${id}</code> назначен администратором пользователем <code>${ctx.from.id}</code>`, { parse_mode: 'HTML' });
+            }
+        );
+    });
+}));
+
+// Снять права администратора
+bot.command('remove_admin', (ctx) => isAdmin(ctx, () => {
+    const id = parseInt(ctx.message.text.split(' ')[1]);
+    if (!id) return ctx.reply('Использование: /remove_admin <telegram_id>');
+    if (id === ctx.from.id) return ctx.reply('❌ Нельзя снять права у самого себя.');
+
+    db.get('SELECT * FROM admins WHERE telegram_id = ?', [id], (err, admin) => {
+        if (err || !admin) return ctx.reply('❌ Пользователь не является администратором.');
+        if (admin.is_super) return ctx.reply('❌ Нельзя снять права у супер-администратора.');
+
+        db.run('DELETE FROM admins WHERE telegram_id = ?', [id], function(err) {
+            if (err || this.changes === 0) return ctx.reply('Ошибка.');
+            ctx.reply(`✅ Права администратора у <code>${id}</code> сняты.`, { parse_mode: 'HTML' });
+            bot.telegram.sendMessage(id, '⚠️ Ваши права администратора были сняты.').catch(() => {});
+        });
+    });
+}));
+
+// Список администраторов
+bot.command('list_admins', (ctx) => isAdmin(ctx, () => {
+    db.all('SELECT a.telegram_id, a.is_super, u.phone FROM admins a LEFT JOIN users u ON a.telegram_id = u.telegram_id', (err, rows) => {
+        if (err) return ctx.reply('Ошибка БД.');
+        if (!rows.length) return ctx.reply('Нет администраторов.');
+        let msg = '👮 <b>Список администраторов:</b>\n\n';
+        rows.forEach(r => {
+            const role = r.is_super ? '👑 Супер-админ' : '🔐 Админ';
+            msg += `${role}\n🆔 <code>${r.telegram_id}</code>  📱 ${r.phone || '—'}\n`;
+            msg += `/remove_admin ${r.telegram_id}\n\n`;
+        });
+        ctx.reply(msg, { parse_mode: 'HTML' });
     });
 }));
 
@@ -777,6 +845,73 @@ bot.action('adm_broadcast', (ctx) => isAdmin(ctx, () => {
     ctx.reply('📢 Введите сообщение для рассылки всем активным пользователям:');
 }));
 
+// Список администраторов
+bot.action('adm_admins', (ctx) => isAdmin(ctx, () => {
+    ctx.answerCbQuery().catch(() => {});
+    db.all(
+        'SELECT a.telegram_id, a.is_super, u.phone FROM admins a LEFT JOIN users u ON a.telegram_id = u.telegram_id ORDER BY a.is_super DESC',
+        (err, rows) => {
+            if (err) return ctx.reply('Ошибка БД.');
+            if (!rows.length) return ctx.reply('Нет администраторов.');
+
+            let msg = '👮 <b>Администраторы бота:</b>\n\n';
+            const btns = [];
+
+            rows.forEach(r => {
+                const role = r.is_super ? '👑 Супер-админ' : '🔐 Админ';
+                msg += `${role}\n🆔 <code>${r.telegram_id}</code>  📱 ${r.phone || '—'}\n\n`;
+                if (!r.is_super) {
+                    btns.push([Markup.button.callback(`❌ Снять ${r.telegram_id}`, `adm_remove_admin:${r.telegram_id}`)]);
+                }
+            });
+
+            msg += '➕ Назначить нового: /make_admin &lt;ID&gt;';
+            ctx.reply(msg, {
+                parse_mode: 'HTML',
+                ...Markup.inlineKeyboard([
+                    ...btns,
+                    [Markup.button.callback('➕ Назначить админа', 'adm_make_admin')],
+                    [Markup.button.callback('◀️ Назад', 'adm_back')],
+                ]),
+            });
+        }
+    );
+}));
+
+// Назначить нового администратора через кнопку
+bot.action('adm_make_admin', (ctx) => isAdmin(ctx, () => {
+    ctx.answerCbQuery().catch(() => {});
+    userStates.set(ctx.from.id, { action: 'admin_make_admin' });
+    ctx.reply(
+        '➕ <b>Назначить администратора</b>\n\nВведите <b>Telegram ID</b> пользователя:\n<i>Узнать ID можно у @userinfobot</i>',
+        { parse_mode: 'HTML' }
+    );
+}));
+
+// Снять права администратора через кнопку
+bot.action(/^adm_remove_admin:(\d+)$/, (ctx) => isAdmin(ctx, () => {
+    const id = parseInt(ctx.match[1]);
+    ctx.answerCbQuery().catch(() => {});
+    if (id === ctx.from.id) return ctx.reply('❌ Нельзя снять права у самого себя.');
+
+    db.get('SELECT is_super FROM admins WHERE telegram_id = ?', [id], (err, row) => {
+        if (err || !row) return ctx.reply('❌ Администратор не найден.');
+        if (row.is_super) return ctx.reply('❌ Нельзя снять права у супер-администратора.');
+
+        db.run('DELETE FROM admins WHERE telegram_id = ?', [id], function(delErr) {
+            if (delErr || this.changes === 0) return ctx.reply('Ошибка.');
+            ctx.reply(`✅ Права администратора у <code>${id}</code> сняты.`, { parse_mode: 'HTML' });
+            bot.telegram.sendMessage(id, '⚠️ Ваши права администратора были сняты.').catch(() => {});
+            notifyAdmins(`⚠️ Права администратора у <code>${id}</code> сняты пользователем <code>${ctx.from.id}</code>`, { parse_mode: 'HTML' });
+        });
+    });
+}));
+
+bot.action('adm_back', (ctx) => {
+    ctx.answerCbQuery().catch(() => {});
+    ctx.editMessageText('🔧 Панель администратора:', adminMenuKeyboard());
+});
+
 // ─── Telegram Stars — обработка платежей ─────────────────────────────────────
 
 // Подтверждаем платёж перед списанием
@@ -869,6 +1004,50 @@ bot.on('text', async (ctx) => {
 
     const state = userStates.get(userId);
     if (!state) return;
+
+    // Admin: назначить администратора через диалог
+    if (state.action === 'admin_make_admin') {
+        userStates.delete(userId);
+        const targetId = parseInt(text);
+        if (isNaN(targetId)) return ctx.reply('❌ Некорректный ID. Введите числовой Telegram ID.');
+
+        db.get('SELECT * FROM users WHERE telegram_id = ?', [targetId], (err, user) => {
+            if (err || !user) {
+                return ctx.reply(
+                    `❌ Пользователь <code>${targetId}</code> не найден в базе бота.\n\nПользователь должен сначала зарегистрироваться через /start.`,
+                    { parse_mode: 'HTML' }
+                );
+            }
+            db.run('INSERT OR REPLACE INTO admins (telegram_id, is_super) VALUES (?, 0)', [targetId], (err) => {
+                if (err) return ctx.reply('Ошибка БД.');
+                db.run('UPDATE users SET allowed = 1 WHERE telegram_id = ?', [targetId]);
+
+                ctx.reply(
+                    `✅ Пользователь <code>${targetId}</code> (📱 ${user.phone || '—'}) назначен администратором!\n\n` +
+                    `Для снятия прав: /remove_admin ${targetId}`,
+                    { parse_mode: 'HTML', ...adminMenuKeyboard() }
+                );
+
+                bot.telegram.sendMessage(targetId,
+                    '🔐 <b>Вам выданы права администратора!</b>\n\n' +
+                    'Доступные команды:\n' +
+                    '/admin — панель управления\n' +
+                    '/make_admin — назначать других админов\n' +
+                    '/remove_admin — снимать права\n' +
+                    '/list_admins — список всех админов\n' +
+                    '/broadcast — рассылка\n' +
+                    '/ban /unban — блокировка',
+                    { parse_mode: 'HTML', ...adminMenuKeyboard() }
+                ).catch(() => {});
+
+                notifyAdmins(
+                    `🔐 Пользователь <code>${targetId}</code> назначен администратором пользователем <code>${userId}</code>`,
+                    { parse_mode: 'HTML' }
+                );
+            });
+        });
+        return;
+    }
 
     // Admin broadcast
     if (state.action === 'admin_broadcast') {
