@@ -633,10 +633,15 @@ bot.action('show_balance', (ctx) => {
                 .join('\n');
             const balanceLine = isAdminUser
                 ? `👑 <b>Администратор — неограниченный доступ</b>`
-                : `💰 <b>Баланс: ${row.stars} ⭐</b>`;
+                : `💰 <b>Ваш баланс: ${row.stars} ⭐</b>`;
             ctx.reply(
-                `${balanceLine}\n\n<b>Стоимость запросов:</b>\n${costs}`,
-                { parse_mode: 'HTML' }
+                `${balanceLine}\n\n` +
+                `💳 <b>Пополнение:</b> через Telegram Stars (1 Star = 1 ⭐)\n\n` +
+                `<b>Стоимость запросов:</b>\n${costs}`,
+                {
+                    parse_mode: 'HTML',
+                    ...Markup.inlineKeyboard([[Markup.button.callback('⭐ Купить звёзды', 'buy_stars')]]),
+                }
             );
         });
     });
@@ -647,35 +652,52 @@ bot.action('show_history', (ctx) => {
     showHistory(ctx, ctx.from.id);
 });
 
+// ─── Пакеты звёзд: 1 Telegram Star = 1 звезда в боте ────────────────────────
+const STAR_PACKAGES = [
+    { id: 'pay_10',  stars: 10,  label: '10 ⭐' },
+    { id: 'pay_25',  stars: 25,  label: '25 ⭐' },
+    { id: 'pay_50',  stars: 50,  label: '50 ⭐' },
+    { id: 'pay_100', stars: 100, label: '100 ⭐' },
+    { id: 'pay_250', stars: 250, label: '250 ⭐' },
+    { id: 'pay_500', stars: 500, label: '500 ⭐' },
+];
+
 bot.action('buy_stars', (ctx) => {
     ctx.answerCbQuery().catch(() => {});
     ctx.reply(
-        '⭐ <b>Купить звёзды:</b>\n\n' +
-        '10 ⭐  →  50 руб.\n25 ⭐  →  100 руб.\n50 ⭐  →  180 руб.\n100 ⭐  →  300 руб.',
+        '⭐ <b>Купить звёзды</b>\n\n' +
+        '1 Telegram Star = 1 звезда в боте\n' +
+        'Оплата через встроенный Telegram Stars — моментально и без посредников.\n\n' +
+        'Выберите пакет:',
         {
             parse_mode: 'HTML',
             ...Markup.inlineKeyboard([
-                [Markup.button.callback('10 ⭐  (50 руб)',  'stars_10')],
-                [Markup.button.callback('25 ⭐  (100 руб)', 'stars_25')],
-                [Markup.button.callback('50 ⭐  (180 руб)', 'stars_50')],
-                [Markup.button.callback('100 ⭐ (300 руб)', 'stars_100')],
+                [Markup.button.callback('10 ⭐',  'pay_10'),  Markup.button.callback('25 ⭐',  'pay_25')],
+                [Markup.button.callback('50 ⭐',  'pay_50'),  Markup.button.callback('100 ⭐', 'pay_100')],
+                [Markup.button.callback('250 ⭐', 'pay_250'), Markup.button.callback('500 ⭐', 'pay_500')],
                 [Markup.button.callback('◀️ Назад', 'back_menu')],
             ]),
         }
     );
 });
 
-['stars_10', 'stars_25', 'stars_50', 'stars_100'].forEach(a => {
-    bot.action(a, (ctx) => {
+// Отправляем инвойс на оплату через Telegram Stars
+STAR_PACKAGES.forEach(pkg => {
+    bot.action(pkg.id, async (ctx) => {
         ctx.answerCbQuery().catch(() => {});
-        const m = { stars_10: [10, 50], stars_25: [25, 100], stars_50: [50, 180], stars_100: [100, 300] };
-        const [stars, price] = m[a];
-        ctx.reply(
-            `⭐ Вы выбрали <b>${stars} звёзд</b> за <b>${price} руб.</b>\n\n` +
-            `Переведите ${price} руб. администратору @admin\n` +
-            `Ваш ID: <code>${ctx.from.id}</code>`,
-            { parse_mode: 'HTML' }
-        );
+        try {
+            await ctx.replyWithInvoice({
+                title: `${pkg.stars} звёзд для OSINT-бота`,
+                description: `Пополнение баланса: ${pkg.stars} ⭐\nЗвёзды начислятся автоматически после оплаты.`,
+                payload: JSON.stringify({ userId: ctx.from.id, stars: pkg.stars }),
+                currency: 'XTR',          // Telegram Stars
+                provider_token: '',        // пусто для XTR
+                prices: [{ label: `${pkg.stars} ⭐`, amount: pkg.stars }],
+            });
+        } catch (err) {
+            console.error('[invoice] error:', err.message);
+            ctx.reply('❌ Ошибка создания счёта. Попробуйте позже.');
+        }
     });
 });
 
@@ -731,6 +753,47 @@ bot.action('adm_broadcast', (ctx) => isAdmin(ctx, () => {
     userStates.set(ctx.from.id, { action: 'admin_broadcast' });
     ctx.reply('📢 Введите сообщение для рассылки всем активным пользователям:');
 }));
+
+// ─── Telegram Stars — обработка платежей ─────────────────────────────────────
+
+// Подтверждаем платёж перед списанием
+bot.on('pre_checkout_query', (ctx) => {
+    ctx.answerPreCheckoutQuery(true).catch((err) => {
+        console.error('[pre_checkout] error:', err.message);
+        ctx.answerPreCheckoutQuery(false, 'Ошибка. Попробуйте позже.').catch(() => {});
+    });
+});
+
+// Успешная оплата — начисляем звёзды
+bot.on('message', async (ctx, next) => {
+    const payment = ctx.message?.successful_payment;
+    if (!payment) return next();
+
+    try {
+        const { userId, stars } = JSON.parse(payment.invoice_payload);
+
+        await updateStars(userId, stars);
+        logRequest(userId, 'purchase', `${stars} stars`, 0);
+
+        const user = await getUser(userId).catch(() => null);
+        const newBalance = (user?.stars || 0);
+
+        await ctx.reply(
+            `✅ <b>Оплата прошла! Спасибо!</b>\n\n` +
+            `⭐ Начислено: <b>${stars} звёзд</b>\n` +
+            `💰 Новый баланс: <b>${newBalance} ⭐</b>`,
+            { parse_mode: 'HTML', ...mainMenuKeyboard() }
+        );
+
+        // Уведомляем админа о покупке
+        notifyAdmins(
+            `💰 Покупка звёзд!\n👤 ID: ${userId}\n⭐ ${stars} звёзд\n🔢 Telegram charge: ${payment.telegram_payment_charge_id}`
+        );
+    } catch (err) {
+        console.error('[successful_payment] error:', err.message);
+        ctx.reply('⚠️ Оплата прошла, но возникла ошибка начисления. Обратитесь к администратору с ID: ' + ctx.from.id);
+    }
+});
 
 // ─── Photo handler (для обратного поиска по фото) ────────────────────────────
 bot.on('photo', async (ctx) => {
@@ -825,9 +888,18 @@ bot.on('text', async (ctx) => {
     const cost = COSTS[state.action] || 0;
     if (!isAdminUser && user.stars < cost) {
         userStates.delete(userId);
+        const needed = cost - user.stars;
+        // Найти минимальный пакет который покроет нехватку
+        const pkg = STAR_PACKAGES.find(p => p.stars >= needed) || STAR_PACKAGES[STAR_PACKAGES.length - 1];
         return ctx.reply(
-            `❌ Недостаточно звёзд.\nНужно: <b>${cost} ⭐</b>  |  У вас: <b>${user.stars} ⭐</b>`,
-            { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⭐ Купить звёзды', 'buy_stars')]]) }
+            `❌ <b>Недостаточно звёзд</b>\n\nНужно: <b>${cost} ⭐</b>  |  У вас: <b>${user.stars} ⭐</b>\nНе хватает: <b>${needed} ⭐</b>`,
+            {
+                parse_mode: 'HTML',
+                ...Markup.inlineKeyboard([
+                    [Markup.button.callback(`⭐ Купить ${pkg.stars} звёзд`, pkg.id)],
+                    [Markup.button.callback('💰 Все пакеты', 'buy_stars')],
+                ]),
+            }
         );
     }
 
