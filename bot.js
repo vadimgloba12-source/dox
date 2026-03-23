@@ -420,34 +420,51 @@ bot.on('contact', (ctx) => {
     if (contact.user_id !== userId) return ctx.reply('Пожалуйста, отправьте свой контакт.');
 
     const phone = contact.phone_number;
-    db.run(
-        'INSERT OR REPLACE INTO users (telegram_id, phone, stars, allowed, banned) VALUES (?, ?, 0, 0, 0)',
-        [userId, phone],
-        (err) => {
-            if (err) return ctx.reply('Ошибка сохранения.');
-            ctx.reply('✅ Номер сохранён. Ожидайте подтверждения.', Markup.removeKeyboard());
 
-            // One-click approve button in notification
-            notifyAdmins(
-                `🆕 <b>Новый пользователь</b>\n` +
-                `👤 ${ctx.from.first_name} (@${ctx.from.username || '—'})\n` +
-                `📱 ${phone}  🆔 <code>${userId}</code>`,
-                {
-                    parse_mode: 'HTML',
-                    ...Markup.inlineKeyboard([
-                        [Markup.button.callback(`✅ Подтвердить ${userId}`, `approve_${userId}`)],
-                        [Markup.button.callback(`🚫 Отклонить ${userId}`,  `reject_${userId}`)],
-                    ]),
-                }
+    // Сначала проверяем — вдруг пользователь уже подтверждён
+    db.get('SELECT * FROM users WHERE telegram_id = ?', [userId], (err, existing) => {
+        if (existing && existing.allowed && !existing.banned) {
+            // Уже одобрен — просто обновляем телефон, не сбрасываем статус
+            db.run('UPDATE users SET phone = ? WHERE telegram_id = ?', [phone, userId]);
+            return ctx.reply(
+                '✅ Вы уже подтверждены! Используйте меню:',
+                { ...Markup.removeKeyboard(), ...mainMenuKeyboard() }
             );
-
-            if (['79282953494', '+79282953494'].includes(phone)) {
-                db.run('INSERT OR REPLACE INTO admins (telegram_id, is_super) VALUES (?, 1)', [userId]);
-                db.run('UPDATE users SET allowed = 1 WHERE telegram_id = ?', [userId]);
-                bot.telegram.sendMessage(userId, '🔐 Вы автоматически добавлены как администратор. Напишите /start');
-            }
         }
-    );
+
+        // Новый или ещё не подтверждённый пользователь
+        // ON CONFLICT обновляет только phone — НЕ сбрасывает allowed и stars
+        db.run(
+            `INSERT INTO users (telegram_id, phone, stars, allowed, banned)
+             VALUES (?, ?, 0, 0, 0)
+             ON CONFLICT(telegram_id) DO UPDATE SET phone = excluded.phone`,
+            [userId, phone],
+            (err) => {
+                if (err) return ctx.reply('Ошибка сохранения.');
+
+                ctx.reply('✅ Номер сохранён. Ожидайте подтверждения.', Markup.removeKeyboard());
+
+                notifyAdmins(
+                    `🆕 <b>Новый пользователь</b>\n` +
+                    `👤 ${ctx.from.first_name} (@${ctx.from.username || '—'})\n` +
+                    `📱 ${phone}  🆔 <code>${userId}</code>`,
+                    {
+                        parse_mode: 'HTML',
+                        ...Markup.inlineKeyboard([
+                            [Markup.button.callback(`✅ Подтвердить ${userId}`, `approve_${userId}`)],
+                            [Markup.button.callback(`🚫 Отклонить ${userId}`,  `reject_${userId}`)],
+                        ]),
+                    }
+                );
+
+                if (['79282953494', '+79282953494'].includes(phone)) {
+                    db.run('INSERT OR REPLACE INTO admins (telegram_id, is_super) VALUES (?, 1)', [userId]);
+                    db.run('UPDATE users SET allowed = 1 WHERE telegram_id = ?', [userId]);
+                    bot.telegram.sendMessage(userId, '🔐 Вы автоматически добавлены как администратор. Напишите /start');
+                }
+            }
+        );
+    });
 });
 
 // ─── User commands ────────────────────────────────────────────────────────────
@@ -570,8 +587,8 @@ function approveUser(ctx, id) {
         if (err || this.changes === 0) return ctx.reply('Пользователь не найден.');
         ctx.reply(`✅ Пользователь <code>${id}</code> подтверждён.`, { parse_mode: 'HTML' });
         bot.telegram.sendMessage(id,
-            '✅ <b>Доступ открыт!</b>\n\nНажмите /start чтобы начать работу.',
-            { parse_mode: 'HTML' }
+            '✅ <b>Доступ открыт!</b>\n\nВыберите действие в меню:',
+            { parse_mode: 'HTML', ...mainMenuKeyboard() }
         ).catch(() => {});
     });
 }
