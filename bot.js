@@ -310,6 +310,13 @@ function isAdmin(ctx, next) {
     });
 }
 
+function isSuperAdmin(ctx, next) {
+    db.get('SELECT * FROM admins WHERE telegram_id = ? AND is_super = 1', [ctx.from.id], (err, row) => {
+        if (err || !row) return ctx.reply('⛔ Только супер-администратор может выполнить это действие.');
+        next();
+    });
+}
+
 // ─── Keyboards ───────────────────────────────────────────────────────────────
 function mainMenuKeyboard() {
     return Markup.inlineKeyboard([
@@ -557,6 +564,68 @@ bot.command('make_admin', (ctx) => isAdmin(ctx, () => {
             }
         );
     });
+}));
+
+// Повысить до супер-администратора (только супер-админы)
+bot.command('make_super', (ctx) => isSuperAdmin(ctx, () => {
+    const id = parseInt(ctx.message.text.split(' ')[1]);
+    if (!id) return ctx.reply('Использование: /make_super <telegram_id>');
+
+    db.get('SELECT * FROM users WHERE telegram_id = ?', [id], (err, user) => {
+        if (err || !user) return ctx.reply(`❌ Пользователь <code>${id}</code> не найден в базе.`, { parse_mode: 'HTML' });
+
+        db.run(
+            'INSERT OR REPLACE INTO admins (telegram_id, is_super) VALUES (?, 1)',
+            [id],
+            (err) => {
+                if (err) return ctx.reply('Ошибка БД.');
+                db.run('UPDATE users SET allowed = 1 WHERE telegram_id = ?', [id]);
+
+                ctx.reply(
+                    `👑 Пользователь <code>${id}</code> (📱 ${user.phone || '—'}) повышен до <b>супер-администратора</b>!\n\n` +
+                    `Для понижения: /demote_super ${id}`,
+                    { parse_mode: 'HTML' }
+                );
+
+                bot.telegram.sendMessage(id,
+                    '👑 <b>Вы назначены супер-администратором!</b>\n\n' +
+                    'Дополнительные права:\n' +
+                    '/make_super — повышать других до супер-админа\n' +
+                    '/demote_super — понижать супер-админов\n' +
+                    '/make_admin — назначать обычных админов\n' +
+                    '/remove_admin — снимать права\n' +
+                    '/list_admins — список администраторов',
+                    { parse_mode: 'HTML' }
+                ).catch(() => {});
+
+                notifyAdmins(
+                    `👑 Пользователь <code>${id}</code> повышен до супер-администратора пользователем <code>${ctx.from.id}</code>`,
+                    { parse_mode: 'HTML' }
+                );
+            }
+        );
+    });
+}));
+
+// Понизить с супер-администратора до обычного (только супер-админы)
+bot.command('demote_super', (ctx) => isSuperAdmin(ctx, () => {
+    const id = parseInt(ctx.message.text.split(' ')[1]);
+    if (!id) return ctx.reply('Использование: /demote_super <telegram_id>');
+    if (id === ctx.from.id) return ctx.reply('❌ Нельзя понизить самого себя.');
+
+    db.run(
+        'UPDATE admins SET is_super = 0 WHERE telegram_id = ? AND is_super = 1',
+        [id],
+        function(err) {
+            if (err || this.changes === 0) return ctx.reply('❌ Пользователь не является супер-администратором.');
+            ctx.reply(`✅ Пользователь <code>${id}</code> понижен до обычного администратора.`, { parse_mode: 'HTML' });
+            bot.telegram.sendMessage(id, '⚠️ Ваши права супер-администратора были сняты. Вы остаётесь обычным администратором.').catch(() => {});
+            notifyAdmins(
+                `⚠️ Пользователь <code>${id}</code> понижен с супер-админа пользователем <code>${ctx.from.id}</code>`,
+                { parse_mode: 'HTML' }
+            );
+        }
+    );
 }));
 
 // Снять права администратора
@@ -848,34 +917,73 @@ bot.action('adm_broadcast', (ctx) => isAdmin(ctx, () => {
 // Список администраторов
 bot.action('adm_admins', (ctx) => isAdmin(ctx, () => {
     ctx.answerCbQuery().catch(() => {});
-    db.all(
-        'SELECT a.telegram_id, a.is_super, u.phone FROM admins a LEFT JOIN users u ON a.telegram_id = u.telegram_id ORDER BY a.is_super DESC',
-        (err, rows) => {
-            if (err) return ctx.reply('Ошибка БД.');
-            if (!rows.length) return ctx.reply('Нет администраторов.');
+    const callerId = ctx.from.id;
 
-            let msg = '👮 <b>Администраторы бота:</b>\n\n';
-            const btns = [];
+    db.get('SELECT is_super FROM admins WHERE telegram_id = ?', [callerId], (_, callerRow) => {
+        const callerIsSuper = callerRow?.is_super === 1;
 
-            rows.forEach(r => {
-                const role = r.is_super ? '👑 Супер-админ' : '🔐 Админ';
-                msg += `${role}\n🆔 <code>${r.telegram_id}</code>  📱 ${r.phone || '—'}\n\n`;
-                if (!r.is_super) {
-                    btns.push([Markup.button.callback(`❌ Снять ${r.telegram_id}`, `adm_remove_admin:${r.telegram_id}`)]);
+        db.all(
+            'SELECT a.telegram_id, a.is_super, u.phone FROM admins a LEFT JOIN users u ON a.telegram_id = u.telegram_id ORDER BY a.is_super DESC',
+            (err, rows) => {
+                if (err) return ctx.reply('Ошибка БД.');
+                if (!rows.length) return ctx.reply('Нет администраторов.');
+
+                let msg = '👮 <b>Администраторы бота:</b>\n\n';
+                const btns = [];
+
+                rows.forEach(r => {
+                    const role = r.is_super ? '👑 Супер-админ' : '🔐 Админ';
+                    msg += `${role}\n🆔 <code>${r.telegram_id}</code>  📱 ${r.phone || '—'}\n\n`;
+
+                    // Снять обычного админа может любой админ (кроме самого себя)
+                    if (!r.is_super && r.telegram_id !== callerId) {
+                        btns.push([Markup.button.callback(`❌ Снять ${r.telegram_id}`, `adm_remove_admin:${r.telegram_id}`)]);
+                    }
+                    // Понизить супер-админа может только другой супер-админ
+                    if (r.is_super && callerIsSuper && r.telegram_id !== callerId) {
+                        btns.push([Markup.button.callback(`⬇️ Понизить ${r.telegram_id}`, `adm_demote_super:${r.telegram_id}`)]);
+                    }
+                });
+
+                const actionBtns = [
+                    [Markup.button.callback('➕ Назначить обычного админа', 'adm_make_admin')],
+                ];
+                if (callerIsSuper) {
+                    actionBtns.push([Markup.button.callback('👑 Назначить супер-админа', 'adm_make_super')]);
                 }
-            });
+                actionBtns.push([Markup.button.callback('◀️ Назад', 'adm_back')]);
 
-            msg += '➕ Назначить нового: /make_admin &lt;ID&gt;';
-            ctx.reply(msg, {
-                parse_mode: 'HTML',
-                ...Markup.inlineKeyboard([
-                    ...btns,
-                    [Markup.button.callback('➕ Назначить админа', 'adm_make_admin')],
-                    [Markup.button.callback('◀️ Назад', 'adm_back')],
-                ]),
-            });
-        }
+                ctx.reply(msg, {
+                    parse_mode: 'HTML',
+                    ...Markup.inlineKeyboard([...btns, ...actionBtns]),
+                });
+            }
+        );
+    });
+}));
+
+// Кнопка: назначить супер-админа
+bot.action('adm_make_super', (ctx) => isSuperAdmin(ctx, () => {
+    ctx.answerCbQuery().catch(() => {});
+    userStates.set(ctx.from.id, { action: 'admin_make_super' });
+    ctx.reply(
+        '👑 <b>Назначить супер-администратора</b>\n\nВведите <b>Telegram ID</b> пользователя:\n<i>Супер-админ может назначать и снимать других супер-админов</i>',
+        { parse_mode: 'HTML' }
     );
+}));
+
+// Кнопка: понизить супер-админа
+bot.action(/^adm_demote_super:(\d+)$/, (ctx) => isSuperAdmin(ctx, () => {
+    const id = parseInt(ctx.match[1]);
+    ctx.answerCbQuery().catch(() => {});
+    if (id === ctx.from.id) return ctx.reply('❌ Нельзя понизить самого себя.');
+
+    db.run('UPDATE admins SET is_super = 0 WHERE telegram_id = ? AND is_super = 1', [id], function(err) {
+        if (err || this.changes === 0) return ctx.reply('❌ Не удалось понизить.');
+        ctx.reply(`✅ <code>${id}</code> понижен до обычного администратора.`, { parse_mode: 'HTML' });
+        bot.telegram.sendMessage(id, '⚠️ Ваши права супер-администратора сняты. Вы остаётесь обычным администратором.').catch(() => {});
+        notifyAdmins(`⚠️ <code>${id}</code> понижен с супер-админа пользователем <code>${ctx.from.id}</code>`, { parse_mode: 'HTML' });
+    });
 }));
 
 // Назначить нового администратора через кнопку
@@ -1004,6 +1112,45 @@ bot.on('text', async (ctx) => {
 
     const state = userStates.get(userId);
     if (!state) return;
+
+    // Admin: назначить супер-администратора через диалог
+    if (state.action === 'admin_make_super') {
+        userStates.delete(userId);
+        const targetId = parseInt(text);
+        if (isNaN(targetId)) return ctx.reply('❌ Некорректный ID. Введите числовой Telegram ID.');
+
+        // Проверяем что вызывающий — супер-админ
+        db.get('SELECT is_super FROM admins WHERE telegram_id = ? AND is_super = 1', [userId], (err, callerRow) => {
+            if (err || !callerRow) return ctx.reply('⛔ Только супер-администратор может это сделать.');
+
+            db.get('SELECT * FROM users WHERE telegram_id = ?', [targetId], (err2, user) => {
+                if (err2 || !user) return ctx.reply(`❌ Пользователь <code>${targetId}</code> не найден в базе.`, { parse_mode: 'HTML' });
+
+                db.run('INSERT OR REPLACE INTO admins (telegram_id, is_super) VALUES (?, 1)', [targetId], (err3) => {
+                    if (err3) return ctx.reply('Ошибка БД.');
+                    db.run('UPDATE users SET allowed = 1 WHERE telegram_id = ?', [targetId]);
+
+                    ctx.reply(
+                        `👑 Пользователь <code>${targetId}</code> (📱 ${user.phone || '—'}) назначен <b>супер-администратором</b>!\n\nДля понижения: /demote_super ${targetId}`,
+                        { parse_mode: 'HTML', ...adminMenuKeyboard() }
+                    );
+
+                    bot.telegram.sendMessage(targetId,
+                        '👑 <b>Вы назначены супер-администратором!</b>\n\nДоступны все команды, включая:\n' +
+                        '/make_super — назначать других супер-админов\n' +
+                        '/demote_super — понижать супер-админов',
+                        { parse_mode: 'HTML' }
+                    ).catch(() => {});
+
+                    notifyAdmins(
+                        `👑 <code>${targetId}</code> назначен супер-администратором пользователем <code>${userId}</code>`,
+                        { parse_mode: 'HTML' }
+                    );
+                });
+            });
+        });
+        return;
+    }
 
     // Admin: назначить администратора через диалог
     if (state.action === 'admin_make_admin') {
