@@ -23,7 +23,8 @@ db.serialize(() => {
         banned BOOLEAN DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
-    db.run(`ALTER TABLE users ADD COLUMN banned BOOLEAN DEFAULT 0`).run; // safe if exists
+    // Миграция: добавить колонку banned если её нет (игнорируем ошибку если уже есть)
+    db.run(`ALTER TABLE users ADD COLUMN banned BOOLEAN DEFAULT 0`, () => {});
     db.run(`CREATE TABLE IF NOT EXISTS admins (
         telegram_id INTEGER UNIQUE,
         is_super BOOLEAN DEFAULT 0
@@ -1314,15 +1315,18 @@ async function handleFullDossier(ctx, query) {
 }
 
 // ─── Launch ───────────────────────────────────────────────────────────────────
-bot.launch().then(() => {
-    console.log('✅ OSINT Dox Bot запущен');
-    db.get('SELECT COUNT(*) AS c FROM admins', (err, row) => {
-        if (!err && row.c === 0 && ADMIN_ID) {
-            db.run('INSERT OR REPLACE INTO admins (telegram_id, is_super) VALUES (?, 1)', [ADMIN_ID], () => {
-                console.log(`Супер-админ ${ADMIN_ID} добавлен.`);
-            });
-        }
-    });
+// В Telegraf v4 bot.launch() не резолвится до остановки — логируем сразу
+console.log('🚀 Запуск OSINT Dox Bot...');
+bot.launch();
+console.log('✅ Бот запущен и принимает сообщения');
+
+// Инициализация первого админа
+db.get('SELECT COUNT(*) AS c FROM admins', (err, row) => {
+    if (!err && row.c === 0 && ADMIN_ID) {
+        db.run('INSERT OR REPLACE INTO admins (telegram_id, is_super) VALUES (?, 1)', [ADMIN_ID], () => {
+            console.log(`🔐 Супер-админ ${ADMIN_ID} добавлен.`);
+        });
+    }
 });
 
 bot.catch((err, ctx) => {
