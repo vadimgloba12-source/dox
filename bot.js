@@ -826,6 +826,146 @@ bot.on('text', async (ctx) => {
     }
 });
 
+// ════════════════════════════════════════════════════════════════
+//   ДОПОЛНИТЕЛЬНЫЕ ИСТОЧНИКИ ДАННЫХ (без API-ключей)
+// ════════════════════════════════════════════════════════════════
+
+// Shodan InternetDB — открытые порты, уязвимости, хостнеймы (БЕСПЛАТНО, без ключа)
+async function shodanLookup(ip) {
+    const key = `shodan_${ip}`;
+    const cached = searchCache.get(key);
+    if (cached) return cached;
+    try {
+        const r = await axios.get(`https://internetdb.shodan.io/${ip}`, { timeout: 8000 });
+        searchCache.set(key, r.data);
+        return r.data;
+    } catch (_) { return null; }
+}
+
+// ipinfo.io — IP + hostname + anycast + org (бесплатно 50k/мес)
+async function ipinfoLookup(ip) {
+    const key = `ipinfo_${ip}`;
+    const cached = searchCache.get(key);
+    if (cached) return cached;
+    try {
+        const r = await axios.get(`https://ipinfo.io/${ip}/json`, { timeout: 8000 });
+        searchCache.set(key, r.data);
+        return r.data;
+    } catch (_) { return null; }
+}
+
+// HackerTarget — обратный IP-поиск: все сайты на одном сервере
+async function reverseIPLookup(ip) {
+    try {
+        const r = await axios.get(`https://api.hackertarget.com/reverseiplookup/?q=${ip}`, { timeout: 12000 });
+        if (!r.data || r.data.startsWith('error')) return [];
+        return r.data.split('\n').filter(Boolean).slice(0, 30);
+    } catch (_) { return []; }
+}
+
+// HackerTarget — DNS записи домена
+async function dnsLookup(domain) {
+    try {
+        const r = await axios.get(`https://api.hackertarget.com/dnslookup/?q=${encodeURIComponent(domain)}`, { timeout: 10000 });
+        if (!r.data || r.data.startsWith('error')) return null;
+        return r.data.trim();
+    } catch (_) { return null; }
+}
+
+// HackerTarget — все поддомены по domain
+async function hostSearch(domain) {
+    try {
+        const r = await axios.get(`https://api.hackertarget.com/hostsearch/?q=${encodeURIComponent(domain)}`, { timeout: 12000 });
+        if (!r.data || r.data.startsWith('error')) return [];
+        return r.data.split('\n').filter(Boolean).map(l => l.split(',')[0]).slice(0, 30);
+    } catch (_) { return []; }
+}
+
+// HackerTarget — ASN информация
+async function asnLookup(ip) {
+    try {
+        const r = await axios.get(`https://api.hackertarget.com/aslookup/?q=${ip}`, { timeout: 8000 });
+        if (!r.data || r.data.startsWith('error')) return null;
+        const parts = r.data.replace(/"/g, '').split(',');
+        return { ip: parts[0], asn: parts[1], range: parts[2], org: parts[3], country: parts[4] };
+    } catch (_) { return null; }
+}
+
+// crt.sh — субдомены из SSL-сертификатов (Certificate Transparency)
+async function crtshLookup(domain) {
+    const key = `crt_${domain}`;
+    const cached = searchCache.get(key);
+    if (cached) return cached;
+    try {
+        const r = await axios.get(`https://crt.sh/?q=%.${domain}&output=json`, { timeout: 20000 });
+        const names = new Set();
+        for (const cert of (r.data || [])) {
+            for (const n of (cert.name_value || '').split('\n')) {
+                const clean = n.trim().replace('*.', '');
+                if (clean && clean.includes('.') && clean.endsWith(domain)) names.add(clean);
+            }
+        }
+        const result = [...names].sort().slice(0, 40);
+        searchCache.set(key, result);
+        return result;
+    } catch (_) { return []; }
+}
+
+// Wayback Machine — последний снимок сайта
+async function waybackLookup(url) {
+    try {
+        const r = await axios.get(`https://archive.org/wayback/available?url=${encodeURIComponent(url)}`, { timeout: 8000 });
+        return r.data?.archived_snapshots?.closest || null;
+    } catch (_) { return null; }
+}
+
+// GitHub API — профиль пользователя
+async function githubUserLookup(username) {
+    const key = `gh_user_${username}`;
+    const cached = searchCache.get(key);
+    if (cached) return cached;
+    try {
+        const r = await axios.get(`https://api.github.com/users/${encodeURIComponent(username)}`, {
+            timeout: 8000, headers: { 'User-Agent': 'OSINT-Bot/1.0' }
+        });
+        searchCache.set(key, r.data);
+        return r.data;
+    } catch (_) { return null; }
+}
+
+// GitHub API — поиск пользователей по запросу
+async function githubSearch(query) {
+    try {
+        const r = await axios.get(
+            `https://api.github.com/search/users?q=${encodeURIComponent(query)}&per_page=5`,
+            { timeout: 8000, headers: { 'User-Agent': 'OSINT-Bot/1.0' } }
+        );
+        return r.data?.items || [];
+    } catch (_) { return []; }
+}
+
+// LeakCheck.io — публичная проверка утечек (показывает поля без паролей)
+async function leakcheckPublic(query) {
+    try {
+        const r = await axios.get(
+            `https://leakcheck.io/api/public?check=${encodeURIComponent(query)}`,
+            { timeout: 10000 }
+        );
+        return r.data;
+    } catch (_) { return null; }
+}
+
+// urlscan.io — поиск последних сканов домена
+async function urlscanSearch(domain) {
+    try {
+        const r = await axios.get(
+            `https://urlscan.io/api/v1/search/?q=domain:${domain}&size=5`,
+            { timeout: 10000, headers: { 'User-Agent': 'OSINT-Bot/1.0' } }
+        );
+        return r.data?.results || [];
+    } catch (_) { return []; }
+}
+
 // ─── Google Search ────────────────────────────────────────────────────────────
 const GOOGLE_CX = process.env.GOOGLE_CX; // Custom Search Engine ID (опционально)
 
@@ -985,29 +1125,66 @@ async function handleIpLookup(ctx, ip) {
 
     if (d.status === 'fail') return ctx.reply(`❌ ${d.message}`);
 
+    // Параллельно запрашиваем все дополнительные источники
+    const [shodanData, ipinfoData, reverseIPs, asnData] = await Promise.all([
+        shodanLookup(ip),
+        ipinfoLookup(ip),
+        reverseIPLookup(ip),
+        asnLookup(ip),
+    ]);
+
     const flags = [d.mobile && '📱 Мобильный', d.proxy && '⚠️ Прокси/VPN', d.hosting && '☁️ Хостинг']
         .filter(Boolean).join('  ') || 'Обычный';
 
-    const msg =
+    // Основная информация
+    let msg =
         `🌐 <b>IP: <code>${d.query}</code></b>\n\n` +
-        `🌍 Страна:     ${d.country} (${d.countryCode})\n` +
-        `🏙 Город:      ${d.city || '—'}\n` +
-        `🏘 Район:      ${d.district || '—'}\n` +
-        `📍 Регион:     ${d.regionName || '—'}\n` +
-        `📮 Индекс:     ${d.zip || '—'}\n` +
-        `📡 Провайдер:  ${d.isp}\n` +
+        `🌍 Страна:      ${d.country} (${d.countryCode})\n` +
+        `🏙 Город:       ${d.city || '—'}\n` +
+        `🏘 Район:       ${d.district || '—'}\n` +
+        `📍 Регион:      ${d.regionName || '—'}\n` +
+        `📮 Индекс:      ${d.zip || '—'}\n` +
+        `📡 Провайдер:   ${d.isp}\n` +
         `🏢 Организация: ${d.org || '—'}\n` +
-        `🔢 AS:         ${d.as || '—'}\n` +
+        `🔢 AS:          ${d.as || '—'}\n` +
         `🕐 Часовой пояс: ${d.timezone}\n` +
-        `📌 Координаты: <code>${d.lat}, ${d.lon}</code>\n` +
-        `🔎 Тип:        ${flags}\n\n` +
-        `<a href="https://www.google.com/maps?q=${d.lat},${d.lon}">🗺 Google Maps</a>  ` +
-        `<a href="https://yandex.ru/maps/?ll=${d.lon},${d.lat}&z=13&pt=${d.lon},${d.lat},pm2rdm">🗺 Яндекс</a>  ` +
-        `<a href="https://www.openstreetmap.org/?mlat=${d.lat}&mlon=${d.lon}&zoom=13">🗺 OSM</a>`;
+        `📌 Координаты:  <code>${d.lat}, ${d.lon}</code>\n` +
+        `🔎 Тип:         ${flags}\n`;
+
+    if (ipinfoData?.hostname) msg += `🔤 Hostname:     ${ipinfoData.hostname}\n`;
+    if (ipinfoData?.anycast)  msg += `⚡ Anycast:      Да (CDN/anycast сеть)\n`;
+    if (asnData?.range)       msg += `🌐 Подсеть:      ${asnData.range}\n`;
+
+    msg += `\n<a href="https://www.google.com/maps?q=${d.lat},${d.lon}">🗺 Google Maps</a>  ` +
+           `<a href="https://yandex.ru/maps/?ll=${d.lon},${d.lat}&z=13&pt=${d.lon},${d.lat},pm2rdm">🗺 Яндекс</a>  ` +
+           `<a href="https://www.openstreetmap.org/?mlat=${d.lat}&mlon=${d.lon}&zoom=13">🗺 OSM</a>`;
 
     await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
 
-    // Static map photo (OSM staticmap service)
+    // Shodan — открытые порты и уязвимости
+    if (shodanData) {
+        let shodanMsg = `🔍 <b>Shodan InternetDB:</b>\n\n`;
+        if (shodanData.ports?.length)     shodanMsg += `🔌 Открытые порты: <code>${shodanData.ports.join(', ')}</code>\n`;
+        if (shodanData.hostnames?.length) shodanMsg += `🔤 Хостнеймы: ${shodanData.hostnames.join(', ')}\n`;
+        if (shodanData.cpes?.length)      shodanMsg += `💾 ПО: ${shodanData.cpes.join(', ')}\n`;
+        if (shodanData.tags?.length)      shodanMsg += `🏷 Теги: ${shodanData.tags.join(', ')}\n`;
+        if (shodanData.vulns?.length)     shodanMsg += `🚨 Уязвимости (CVE): ${shodanData.vulns.join(', ')}\n`;
+        if (shodanMsg.includes('\n\n\n') || shodanMsg === `🔍 <b>Shodan InternetDB:</b>\n\n`) {
+            shodanMsg += 'Открытых портов и уязвимостей не обнаружено.\n';
+        }
+        shodanMsg += `\n🔗 <a href="https://www.shodan.io/host/${ip}">Открыть в Shodan</a>`;
+        await ctx.reply(shodanMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Все сайты на том же сервере
+    if (reverseIPs.length > 0) {
+        let revMsg = `🏠 <b>Другие сайты на этом IP (${reverseIPs.length}):</b>\n\n`;
+        revMsg += reverseIPs.slice(0, 20).map(s => `• ${s}`).join('\n');
+        if (reverseIPs.length > 20) revMsg += `\n<i>...и ещё ${reverseIPs.length - 20}</i>`;
+        await ctx.reply(revMsg, { parse_mode: 'HTML' });
+    }
+
+    // Карта
     const mapUrl = `https://staticmap.openstreetmap.de/staticmap.php?center=${d.lat},${d.lon}&zoom=13&size=600x300&maptype=mapnik&markers=${d.lat},${d.lon},red-pushpin`;
     await sendPhotoSafe(ctx, `📍 ${d.city}, ${d.country}`, mapUrl);
 }
@@ -1392,12 +1569,50 @@ async function handleEmailSearch(ctx, email) {
         await ctx.reply(brMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
     }
 
+    // LeakCheck.io — публичная проверка утечек
+    const leakData = await leakcheckPublic(email);
+    if (leakData?.success) {
+        let leakMsg = `🔓 <b>LeakCheck.io — утечки баз данных:</b>\n\n`;
+        if (leakData.found > 0) {
+            leakMsg += `🚨 Найдено в <b>${leakData.found}</b> утечках!\n`;
+            if (leakData.fields?.length) {
+                leakMsg += `📋 Скомпрометированные поля:\n`;
+                leakData.fields.forEach(f => { leakMsg += `  • ${f}\n`; });
+            }
+            if (leakData.sources?.length) {
+                leakMsg += `\n🗂 Источники:\n`;
+                leakData.sources.slice(0, 8).forEach(s => { leakMsg += `  • ${s}\n`; });
+            }
+        } else {
+            leakMsg += `✅ Email не найден в известных утечках.`;
+        }
+        await ctx.reply(leakMsg, { parse_mode: 'HTML' });
+    }
+
+    // GitHub по email
+    const ghResults = await githubSearch(email);
+    if (ghResults.length) {
+        let ghMsg = `🐙 <b>GitHub профили:</b>\n\n`;
+        for (const u of ghResults.slice(0, 3)) {
+            const full = await githubUserLookup(u.login).catch(() => null);
+            ghMsg += `👤 <a href="${u.html_url}">@${u.login}</a>`;
+            if (full?.name)     ghMsg += ` — ${full.name}`;
+            if (full?.location) ghMsg += ` (${full.location})`;
+            ghMsg += '\n';
+            if (full?.bio)          ghMsg += `  📝 ${full.bio}\n`;
+            if (full?.public_repos) ghMsg += `  📦 Репозиториев: ${full.public_repos}\n`;
+            ghMsg += '\n';
+        }
+        await ctx.reply(ghMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
     const enc = encodeURIComponent(email);
     await ctx.reply(
         `🔍 <b>Проверьте вручную:</b>\n\n` +
         `🔓 <a href="https://haveibeenpwned.com/account/${enc}">HaveIBeenPwned.com</a>\n` +
         `🔍 <a href="https://leakcheck.io/?query=${enc}">LeakCheck.io</a>\n` +
-        `🌐 <a href="https://www.google.com/search?q=%22${enc}%22">Google поиск</a>`,
+        `🐙 <a href="https://github.com/search?q=${enc}&type=users">GitHub</a>  ` +
+        `🌐 <a href="https://www.google.com/search?q=%22${enc}%22">Google</a>`,
         { parse_mode: 'HTML', disable_web_page_preview: true }
     );
 }
@@ -1467,8 +1682,40 @@ async function handleUsernameSearch(ctx, username) {
         await ctx.reply('📭 Профили по данному нику не найдены.');
     }
 
-    // Direct platform links
-    const enc = encodeURIComponent(username);
+    // GitHub — реальные данные профиля
+    const ghUser = await githubUserLookup(username);
+    if (ghUser && ghUser.login) {
+        let ghMsg = `🐙 <b>GitHub: @${ghUser.login}</b>\n\n`;
+        if (ghUser.name)        ghMsg += `👤 Имя: ${ghUser.name}\n`;
+        if (ghUser.bio)         ghMsg += `📝 Bio: ${ghUser.bio}\n`;
+        if (ghUser.company)     ghMsg += `🏢 Компания: ${ghUser.company}\n`;
+        if (ghUser.location)    ghMsg += `📍 Локация: ${ghUser.location}\n`;
+        if (ghUser.email)       ghMsg += `📧 Email: ${ghUser.email}\n`;
+        if (ghUser.blog)        ghMsg += `🌐 Сайт: ${ghUser.blog}\n`;
+        if (ghUser.twitter_username) ghMsg += `🐦 Twitter: @${ghUser.twitter_username}\n`;
+        ghMsg += `📦 Репозиториев: ${ghUser.public_repos || 0}  👥 Подписчиков: ${ghUser.followers || 0}\n`;
+        ghMsg += `📅 Зарегистрирован: ${new Date(ghUser.created_at).toLocaleDateString('ru-RU')}\n`;
+        ghMsg += `🔗 <a href="${ghUser.html_url}">Профиль на GitHub</a>`;
+
+        await ctx.reply(ghMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+
+        // Аватар GitHub
+        if (ghUser.avatar_url) {
+            await sendPhotoSafe(ctx, `🐙 GitHub @${ghUser.login}`, ghUser.avatar_url);
+        }
+    }
+
+    // LeakCheck по нику
+    const leakData = await leakcheckPublic(username);
+    if (leakData?.success && leakData.found > 0) {
+        await ctx.reply(
+            `🔓 <b>LeakCheck: найдено в ${leakData.found} утечках!</b>\n` +
+            (leakData.fields?.length ? `Поля: ${leakData.fields.join(', ')}` : ''),
+            { parse_mode: 'HTML' }
+        );
+    }
+
+    // Прямые ссылки
     await ctx.reply(
         `🔗 <b>Прямые ссылки:</b>\n\n` +
         `🔵 <a href="https://vk.com/${username}">vk.com/${username}</a>\n` +
@@ -1477,7 +1724,8 @@ async function handleUsernameSearch(ctx, username) {
         `🎵 <a href="https://tiktok.com/@${username}">tiktok.com/@${username}</a>\n` +
         `✈️ <a href="https://t.me/${username}">t.me/${username}</a>\n` +
         `🐙 <a href="https://github.com/${username}">github.com/${username}</a>\n` +
-        `📹 <a href="https://youtube.com/@${username}">youtube.com/@${username}</a>`,
+        `📹 <a href="https://youtube.com/@${username}">youtube.com/@${username}</a>\n` +
+        `🔓 <a href="https://leakcheck.io/?query=${username}">LeakCheck.io</a>`,
         { parse_mode: 'HTML', disable_web_page_preview: true }
     );
 }
@@ -1564,18 +1812,79 @@ async function handleWhoisLookup(ctx, target) {
 
     await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
 
-    // Manual lookup links
+    // Дополнительные источники для домена
+    if (!isIp) {
+        const [subdomains, dnsData, hostsData, urlscans, wayback] = await Promise.all([
+            crtshLookup(clean),
+            dnsLookup(clean),
+            hostSearch(clean),
+            urlscanSearch(clean),
+            waybackLookup(clean),
+        ]);
+
+        // DNS записи
+        if (dnsData) {
+            await ctx.reply(
+                `📡 <b>DNS записи (HackerTarget):</b>\n\n<code>${dnsData}</code>`,
+                { parse_mode: 'HTML' }
+            );
+        }
+
+        // Субдомены из SSL-сертификатов
+        if (subdomains.length > 0) {
+            let subMsg = `🔒 <b>Субдомены из SSL-сертификатов (crt.sh): ${subdomains.length}</b>\n\n`;
+            subMsg += subdomains.slice(0, 25).map(s => `• <code>${s}</code>`).join('\n');
+            if (subdomains.length > 25) subMsg += `\n<i>...ещё ${subdomains.length - 25}</i>`;
+            await ctx.reply(subMsg, { parse_mode: 'HTML' });
+        }
+
+        // Хосты на том же домене
+        if (hostsData.length > 0) {
+            let hostMsg = `🌐 <b>Хосты домена (HackerTarget): ${hostsData.length}</b>\n\n`;
+            hostMsg += hostsData.slice(0, 20).map(h => `• <code>${h}</code>`).join('\n');
+            await ctx.reply(hostMsg, { parse_mode: 'HTML' });
+        }
+
+        // urlscan.io — последние сканы
+        if (urlscans.length > 0) {
+            let scanMsg = `🔬 <b>urlscan.io — последние сканы:</b>\n\n`;
+            urlscans.forEach(s => {
+                const page = s.page || {};
+                const verdict = s.verdicts?.overall || {};
+                const date = new Date(s.task?.time || '').toLocaleDateString('ru-RU');
+                scanMsg += `📅 ${date} — ${page.url?.slice(0, 60) || clean}\n`;
+                if (verdict.malicious) scanMsg += `🚨 Вредоносный!\n`;
+                if (page.server) scanMsg += `🖥 Сервер: ${page.server}\n`;
+                scanMsg += `🔗 <a href="${s.result}">Подробнее</a>\n\n`;
+            });
+            await ctx.reply(scanMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+        }
+
+        // Wayback Machine
+        if (wayback?.url) {
+            await ctx.reply(
+                `📚 <b>Wayback Machine:</b>\n\n` +
+                `📅 Последний снимок: ${wayback.timestamp?.replace(/(\d{4})(\d{2})(\d{2}).*/, '$1-$2-$3') || wayback.timestamp}\n` +
+                `🔗 <a href="${wayback.url}">Открыть архив</a>`,
+                { parse_mode: 'HTML', disable_web_page_preview: true }
+            );
+        }
+    }
+
+    // Ссылки для ручного поиска
     await ctx.reply(
         `🔗 <b>Проверьте вручную:</b>\n\n` +
-        `🔍 <a href="https://who.is/whois/${clean}">who.is/whois/${clean}</a>\n` +
-        `🌐 <a href="https://www.whois.com/whois/${clean}">whois.com</a>\n` +
+        `🔍 <a href="https://who.is/whois/${clean}">who.is</a>  ` +
+        `🌐 <a href="https://www.whois.com/whois/${clean}">whois.com</a>  ` +
         `📡 <a href="https://2ip.ru/whois/?ip=${clean}">2ip.ru</a>\n` +
-        `🏢 <a href="https://nic.ru/whois/?query=${clean}">nic.ru</a>`,
+        `🔒 <a href="https://crt.sh/?q=%.${clean}">crt.sh (SSL)</a>  ` +
+        `🔬 <a href="https://urlscan.io/search/#domain:${clean}">urlscan.io</a>  ` +
+        `📚 <a href="https://web.archive.org/web/*/${clean}">Wayback</a>`,
         { parse_mode: 'HTML', disable_web_page_preview: true }
     );
 
-    // Google search for the domain
-    const domainSearch = await googleSearch(`"${clean}" владелец информация отзывы`);
+    // Google упоминания
+    const domainSearch = await googleSearch(`"${clean}" владелец информация`);
     const domRes = domainSearch.organic_results || [];
     if (domRes.length) {
         let domMsg = `🔍 <b>Упоминания в сети:</b>\n\n`;
