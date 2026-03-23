@@ -233,6 +233,8 @@ const COSTS = {
     connections:     20,  // Связи и окружение человека
     doc_search:      20,  // Поиск по документам / паспорту
     phone_to_ip:     20,  // определить IP по номеру телефона + IP-ловушка
+    housing_search:  25,  // поиск жилья: доставочные утечки, Росреестр, суды
+    deep_leaks:      25,  // утечки ВК/Яндекс/Mail/Сбер/СДЭК/HH и др.
     spiderfoot:      30,  // глубокое автосканирование SpiderFoot (230 модулей)
     full_dossier:    45,  // всё сразу (экономия 35⭐)
 };
@@ -341,6 +343,8 @@ function mainMenuKeyboard() {
             Markup.button.callback('📄 Документы',        'doc_search'),
         ],
         [Markup.button.callback('🌍 IP по номеру телефона', 'phone_to_ip')],
+        [Markup.button.callback('🏘 Жильё человека',          'housing_search')],
+        [Markup.button.callback('🔓 Утечки: ВК/Яндекс/Mail/Сбер', 'deep_leaks')],
         [Markup.button.callback('🕷 SpiderFoot — глубокий скан', 'spiderfoot')],
         [
             Markup.button.callback('⭐ Купить звёзды', 'buy_stars'),
@@ -590,6 +594,8 @@ const ACTION_PROMPTS = {
     doc_search:      `📄 <b>Поиск по документам</b>\n\nВведите номер паспорта, ИНН, СНИЛС или ФИО:\nПример: <code>4510 123456</code> или <code>500110474504</code>\n\n💰 Стоимость: ${COSTS.doc_search} ⭐`,
     reverse_image:   `📷 <b>Поиск личности по фото</b>\n\nОтправьте <b>фотографию</b> — бот определит кто на ней через Google Lens и найдёт все упоминания в сети.\n\n💰 Стоимость: ${COSTS.reverse_image} ⭐`,
     phone_to_ip:     `🌍 <b>Определить IP по номеру телефона</b>\n\nВведите номер телефона:\nПример: <code>+79001234567</code>\n\nБот:\n• Ищет IP в утечках баз данных\n• Создаёт уникальную ссылку-ловушку — отправите её цели, и при клике получите точный IP\n• Показывает геолокацию оператора\n\n💰 Стоимость: ${COSTS.phone_to_ip} ⭐`,
+    housing_search:  `🏘 <b>Поиск жилья человека</b>\n\nВведите ФИО или номер телефона.\n\nИсточники:\n• Утечки Яндекс.Еда / Delivery Club (адреса доставки)\n• Утечки СДЭК, Boxberry, Почта России\n• Росреестр — владение недвижимостью\n• Судебные дела — адреса в документах\n• ФССП — исполнительные производства\n• Авито / Циан — объявления недвижимости\n• Избирательные списки\n\n💰 Стоимость: ${COSTS.housing_search} ⭐`,
+    deep_leaks:      `🔓 <b>Утечки популярных сервисов</b>\n\nВведите ФИО, телефон, email или ник.\n\nИщет в утечках:\n• ВКонтакте (100M+ записей)\n• Яндекс.Еда — адреса и заказы\n• Mail.ru — аккаунты и пароли\n• Сбербанк / Тинькофф\n• СДЭК — адреса получателей\n• HH.ru — резюме и работодатели\n• LinkedIn — профессиональные данные\n• Wildberries / Ozon — заказы\n• ГИБДД — водительские данные\n\n💰 Стоимость: ${COSTS.deep_leaks} ⭐`,
     spiderfoot:      `🕷 <b>SpiderFoot — глубокий автоматический скан</b>\n\n230 OSINT-модулей. Поддерживаемые цели:\n• <code>IP-адрес</code> — хосты, порты, угрозы, WHOIS\n• <code>domain.com</code> — DNS, SSL, email, субдомены\n• <code>email@mail.ru</code> — аккаунты, утечки, PGP\n• <code>@username</code> — 500+ соцсетей, GitHub, форумы\n• <code>+79001234567</code> — телефон, геолокация\n\nВремя скана: 30–90 сек.\n💰 Стоимость: ${COSTS.spiderfoot} ⭐`,
 };
 
@@ -932,6 +938,8 @@ bot.on('text', async (ctx) => {
                 userStates.set(userId, { action: 'reverse_image' }); // восстановить состояние
                 return;
             case 'phone_to_ip':     await handlePhoneToIP(ctx, text);      break;
+            case 'housing_search':  await handleHousingSearch(ctx, text);  break;
+            case 'deep_leaks':      await handleDeepLeaks(ctx, text);      break;
             case 'spiderfoot':      await handleSpiderFoot(ctx, text);     break;
             case 'full_dossier':    await handleFullDossier(ctx, text);    break;
         }
@@ -2272,12 +2280,14 @@ async function handleConnections(ctx, query) {
 
 // ─── Document Search (Документы и паспорт) ───────────────────────────────────
 async function handleDocSearch(ctx, query) {
-    await ctx.reply(`📄 <b>Поиск по документам: ${query}</b>`, { parse_mode: 'HTML' });
+    await ctx.reply(`📄 <b>Поиск по документам: ${query}</b>\n\nАнализирую...`, { parse_mode: 'HTML' });
 
-    const [mainData, leakData, govData] = await Promise.all([
-        googleSearch(`"${query}" паспорт документы данные`),
-        googleSearch(`"${query}" (утечка OR слив OR leaked OR breach OR база данных)`),
-        googleSearch(`"${query}" site:nalog.ru OR site:gosuslugi.ru OR site:rosreestr.ru OR site:egrul.nalog.ru`),
+    const [mainData, leakData, govData, passportData, gibddData] = await Promise.all([
+        googleSearch(`"${query}" паспорт серия номер документы`),
+        googleSearch(`"${query}" (утечка OR слив OR leaked OR breach OR "база данных") (паспорт OR ИНН OR СНИЛС)`),
+        googleSearch(`"${query}" site:nalog.ru OR site:gosuslugi.ru OR site:rosreestr.gov.ru OR site:egrul.nalog.ru`),
+        googleSearch(`"${query}" ("серия паспорта" OR "номер паспорта" OR "дата выдачи" OR "кем выдан" OR "паспорт РФ")`),
+        googleSearch(`"${query}" (гибдд OR "права" OR "водительское удостоверение" OR "регистрация автомобиля" OR "ПТС" OR "СТС")`),
     ]);
 
     const results = mainData.organic_results || [];
@@ -2324,15 +2334,384 @@ async function handleDocSearch(ctx, query) {
         await ctx.reply(govMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
     }
 
+    // Паспортные данные
+    const passRes = passportData.organic_results || [];
+    if (passRes.length) {
+        const allText = passRes.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+        // Извлекаем паспортные данные
+        const passportNum = allText.match(/\b\d{4}\s*\d{6}\b/g) || [];
+        const innNum      = allText.match(/\bИНН\s*:?\s*(\d{10,12})\b/gi) || [];
+        const snilsNum    = allText.match(/\bСНИЛС\s*:?\s*([\d\-]{11,14})\b/gi) || [];
+        let msg = `🛂 <b>Паспортные данные:</b>\n\n`;
+        if (passportNum.length) msg += `📋 Паспорта: ${[...new Set(passportNum)].slice(0,3).map(n=>`<code>${n}</code>`).join(', ')}\n`;
+        if (innNum.length)      msg += `🔢 ${[...new Set(innNum)].slice(0,2).join(', ')}\n`;
+        if (snilsNum.length)    msg += `🔢 ${[...new Set(snilsNum)].slice(0,2).join(', ')}\n`;
+        if (passportNum.length || innNum.length || snilsNum.length) msg += '\n';
+        passRes.slice(0, 4).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // ГИБДД данные
+    const gibddRes = gibddData.organic_results || [];
+    if (gibddRes.length) {
+        let msg = `🚗 <b>ГИБДД — транспорт и водительские данные:</b>\n\n`;
+        gibddRes.slice(0, 4).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
     // Прямые ссылки
     const enc = encodeURIComponent(query);
     await ctx.reply(
         `🔎 <b>Проверьте вручную:</b>\n\n` +
         `📋 <a href="https://egrul.nalog.ru/index.html">ЕГРЮЛ/ЕГРИП (ИНН)</a>\n` +
         `👮 <a href="https://xn--b1afk4ade4e.xn--b1ab2a0a.xn--b1aew.xn--p1ai/info-service.htm#!5">МВД — действительность паспорта</a>\n` +
+        `🚗 <a href="https://xn--90adear.xn--p1ai/check/driver">ГИБДД — проверить водительское</a>\n` +
         `🏠 <a href="https://rosreestr.gov.ru/wps/portal/online_check">Росреестр — недвижимость</a>\n` +
         `💰 <a href="https://fssp.gov.ru/iss/ip/?territory=0&predmet=0&name=${enc}">ФССП — долги</a>\n` +
-        `🔍 <a href="https://leakcheck.io/?query=${enc}">LeakCheck.io — утечки</a>`,
+        `🔍 <a href="https://leakcheck.io/?query=${enc}">LeakCheck.io — утечки</a>\n` +
+        `🔍 <a href="https://www.google.com/search?q=%22${enc}%22+%22паспорт%22+%22серия%22">Google: паспортные данные</a>`,
+        { parse_mode: 'HTML', disable_web_page_preview: true }
+    );
+}
+
+// ─── Поиск жилья человека ────────────────────────────────────────────────────
+async function handleHousingSearch(ctx, query) {
+    await ctx.reply(
+        `🏘 <b>Поиск жилья: ${query}</b>\n\nАнализирую 7 источников одновременно...`,
+        { parse_mode: 'HTML' }
+    );
+
+    const [
+        deliveryData,   // Яндекс.Еда / Delivery Club адреса доставки
+        sdekData,       // СДЭК и другие доставки
+        rosreestrData,  // Недвижимость Росреестр
+        courtData,      // Судебные документы с адресами
+        avitoData,      // Авито / Циан — объявления
+        fsspData,       // ФССП — исполнительные производства
+        voterData,      // Избирательные списки
+    ] = await Promise.all([
+        googleSearch(`"${query}" ("яндекс.еда" OR "delivery club" OR "яндекседа") адрес доставки`),
+        googleSearch(`"${query}" (сдэк OR boxberry OR "pochta.ru" OR "почта России") адрес получател`),
+        googleSearch(`"${query}" site:rosreestr.gov.ru OR site:egrn.ru OR "кадастровый номер" OR "объект недвижимости"`),
+        googleSearch(`"${query}" ("адрес регистрации" OR "адрес проживания" OR "прописан" OR "место жительства") site:sudact.ru OR site:kad.arbitr.ru OR site:mos-gorsud.ru`),
+        googleSearch(`"${query}" site:avito.ru OR site:cian.ru OR site:domofond.ru (квартира OR дом OR комната OR аренда OR продажа)`),
+        googleSearch(`"${query}" site:fssp.gov.ru OR ("исполнительное производство" AND ("адрес" OR "г." OR "ул." OR "д."))`),
+        googleSearch(`"${query}" "избирательный список" OR "список избирателей" OR "электоральная база" адрес`),
+    ]);
+
+    let foundAnything = false;
+
+    // Утечки служб доставки — главный источник домашних адресов
+    const deliveryRes = deliveryData.organic_results || [];
+    if (deliveryRes.length) {
+        foundAnything = true;
+        const allText = deliveryRes.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+        const contacts = extractContactInfo(allText);
+
+        let msg = `📦 <b>Утечки служб доставки (Яндекс.Еда / Delivery Club):</b>\n\n`;
+        if (contacts.addresses.length) {
+            msg += `📍 <b>Адреса из утечек:</b>\n`;
+            contacts.addresses.forEach(a => { msg += `  • ${a.trim()}\n`; });
+            msg += '\n';
+        }
+        deliveryRes.slice(0, 4).forEach((r, i) => {
+            msg += `<b>${i + 1}. ${r.title}</b>\n`;
+            if (r.snippet) msg += `${r.snippet}\n`;
+            msg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // СДЭК / другие доставки
+    const sdekRes = sdekData.organic_results || [];
+    if (sdekRes.length) {
+        foundAnything = true;
+        const allText = sdekRes.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+        const contacts = extractContactInfo(allText);
+        let msg = `🚚 <b>СДЭК / Boxberry / Почта России:</b>\n\n`;
+        if (contacts.addresses.length) {
+            msg += `📍 ${contacts.addresses.join(' | ')}\n\n`;
+        }
+        sdekRes.slice(0, 3).forEach((r, i) => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Росреестр — недвижимость
+    const rosRes = rosreestrData.organic_results || [];
+    if (rosRes.length) {
+        foundAnything = true;
+        let msg = `🏛 <b>Росреестр — недвижимость:</b>\n\n`;
+        rosRes.slice(0, 4).forEach((r, i) => {
+            msg += `<b>${i + 1}. ${r.title}</b>\n`;
+            if (r.snippet) msg += `${r.snippet}\n`;
+            msg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Судебные документы
+    const courtRes = courtData.organic_results || [];
+    if (courtRes.length) {
+        foundAnything = true;
+        const allText = courtRes.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+        const contacts = extractContactInfo(allText);
+        let msg = `⚖️ <b>Судебные документы:</b>\n\n`;
+        if (contacts.addresses.length) {
+            msg += `📍 <b>Адреса из документов:</b>\n`;
+            contacts.addresses.forEach(a => { msg += `  • ${a.trim()}\n`; });
+            msg += '\n';
+        }
+        courtRes.slice(0, 3).forEach((r, i) => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 120)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Авито / Циан
+    const avitoRes = avitoData.organic_results || [];
+    if (avitoRes.length) {
+        foundAnything = true;
+        let msg = `🏠 <b>Авито / Циан — объявления:</b>\n\n`;
+        avitoRes.slice(0, 4).forEach((r, i) => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // ФССП результаты
+    const fsspRes = fsspData.organic_results || [];
+    if (fsspRes.length) {
+        foundAnything = true;
+        const allText = fsspRes.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+        const contacts = extractContactInfo(allText);
+        let msg = `💰 <b>ФССП — исполнительные производства:</b>\n\n`;
+        if (contacts.addresses.length) {
+            msg += `📍 ${contacts.addresses.slice(0, 3).join('\n📍 ')}\n\n`;
+        }
+        fsspRes.slice(0, 3).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    if (!foundAnything) {
+        await ctx.reply(`📭 Данные о жилье по запросу "<b>${query}</b>" в открытых источниках не найдены.`, { parse_mode: 'HTML' });
+    }
+
+    // Прямые ссылки для ручного поиска
+    const enc = encodeURIComponent(query);
+    await ctx.reply(
+        `🔎 <b>Поиск вручную:</b>\n\n` +
+        `🏛 <a href="https://rosreestr.gov.ru/wps/portal/online_check">Росреестр — проверить недвижимость</a>\n` +
+        `💰 <a href="https://fssp.gov.ru/iss/ip/?territory=0&predmet=0&name=${enc}">ФССП — долги и адрес</a>\n` +
+        `🏠 <a href="https://www.avito.ru/moskva?q=${enc}">Авито</a>  ` +
+        `<a href="https://www.cian.ru/cat.php?deal_type=rent&offer_type=flat&q=${enc}">Циан</a>\n` +
+        `⚖️ <a href="https://sudact.ru/search/?query=${enc}">ГАС Правосудие</a>  ` +
+        `<a href="https://kad.arbitr.ru/?ins[0]=${enc}">Арбитраж</a>`,
+        { parse_mode: 'HTML', disable_web_page_preview: true }
+    );
+}
+
+// ─── Утечки популярных сервисов ───────────────────────────────────────────────
+async function handleDeepLeaks(ctx, query) {
+    await ctx.reply(
+        `🔓 <b>Поиск в утечках: ${query}</b>\n\nПроверяю 10+ сервисов параллельно...`,
+        { parse_mode: 'HTML' }
+    );
+
+    const [
+        vkData,         // ВКонтакте
+        yandexData,     // Яндекс (Еда, Такси, Маркет)
+        mailData,       // Mail.ru / OK.ru
+        bankData,       // Сбер / Тинькофф / ВТБ
+        deliveryData,   // Wildberries / Ozon / СДЭК
+        hhData,         // HH.ru / LinkedIn — работа
+        gibddData,      // ГИБДД — водительские данные
+        govData,        // Гос. базы — ИНН, СНИЛС, паспорт
+        leakSites,      // Сайты с утечками
+    ] = await Promise.all([
+        googleSearch(`"${query}" site:vk.com`),
+        googleSearch(`"${query}" ("яндекс.еда" OR "yandex.food" OR "яндекс.такси" OR "яндекс.маркет" OR "яндекс.деньги")`),
+        googleSearch(`"${query}" (site:mail.ru OR site:ok.ru OR "@mail.ru" OR "@inbox.ru" OR "@list.ru")`),
+        googleSearch(`"${query}" (сбербанк OR тинькофф OR сберbank OR tinkoff OR "альфа-банк" OR втб OR "банк") счёт OR карта OR транзакция`),
+        googleSearch(`"${query}" (wildberries OR ozon OR lamoda OR сдэк OR boxberry) заказ OR покупка OR доставка`),
+        googleSearch(`"${query}" (site:hh.ru OR site:linkedin.com OR site:superjob.ru OR "резюме" OR "работодатель" OR "должность")`),
+        googleSearch(`"${query}" (гибдд OR "driving license" OR "водительское" OR "регистрация ТС" OR "транспортное средство")`),
+        googleSearch(`"${query}" (ИНН OR СНИЛС OR "пенсионный фонд" OR ФНС OR "налоговая" OR "пособие" OR "госуслуги")`),
+        googleSearch(`"${query}" (утечка OR слив OR "база данных" OR дамп OR leaked) (вконтакте OR яндекс OR mail OR сбер)`),
+    ]);
+
+    // LeakCheck.io
+    const leakCheck = await leakcheckPublic(query).catch(() => null);
+
+    let totalFound = 0;
+
+    // LeakCheck результаты
+    if (leakCheck?.success && leakCheck.found > 0) {
+        totalFound++;
+        let msg = `🔓 <b>LeakCheck.io — найдено в ${leakCheck.found} утечках!</b>\n\n`;
+        if (leakCheck.fields?.length) {
+            msg += `📋 Скомпрометированные поля:\n${leakCheck.fields.map(f => `  • ${f}`).join('\n')}\n\n`;
+        }
+        if (leakCheck.sources?.length) {
+            msg += `🗂 Источники:\n${leakCheck.sources.slice(0, 10).map(s => `  • ${s}`).join('\n')}`;
+        }
+        await ctx.reply(msg, { parse_mode: 'HTML' });
+    }
+
+    // ВКонтакте
+    const vkRes = vkData.organic_results || [];
+    if (vkRes.length) {
+        totalFound++;
+        let msg = `🔵 <b>ВКонтакте:</b>\n\n`;
+        const allText = vkRes.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+        const contacts = extractContactInfo(allText);
+        if (contacts.phones.length)    msg += `📞 ${contacts.phones.join(', ')}\n`;
+        if (contacts.emails.length)    msg += `📧 ${contacts.emails.join(', ')}\n`;
+        if (contacts.addresses.length) msg += `📍 ${contacts.addresses[0]}\n`;
+        if (contacts.phones.length || contacts.emails.length || contacts.addresses.length) msg += '\n';
+        vkRes.slice(0, 4).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Яндекс сервисы
+    const yandexRes = yandexData.organic_results || [];
+    if (yandexRes.length) {
+        totalFound++;
+        const allText = yandexRes.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+        const contacts = extractContactInfo(allText);
+        let msg = `🟡 <b>Яндекс (Еда / Такси / Маркет):</b>\n\n`;
+        if (contacts.addresses.length) msg += `📍 <b>Адреса:</b> ${contacts.addresses.slice(0,3).join(' | ')}\n\n`;
+        yandexRes.slice(0, 4).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Mail.ru / OK.ru
+    const mailRes = mailData.organic_results || [];
+    if (mailRes.length) {
+        totalFound++;
+        let msg = `📧 <b>Mail.ru / Одноклассники:</b>\n\n`;
+        mailRes.slice(0, 4).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Банковские данные
+    const bankRes = bankData.organic_results || [];
+    if (bankRes.length) {
+        totalFound++;
+        let msg = `🏦 <b>Банковские упоминания:</b>\n\n`;
+        bankRes.slice(0, 3).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Маркетплейсы и доставка
+    const deliveryRes = deliveryData.organic_results || [];
+    if (deliveryRes.length) {
+        totalFound++;
+        const allText = deliveryRes.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+        const contacts = extractContactInfo(allText);
+        let msg = `🛒 <b>Wildberries / Ozon / СДЭК — заказы:</b>\n\n`;
+        if (contacts.addresses.length) msg += `📍 ${contacts.addresses.slice(0,2).join('\n📍 ')}\n\n`;
+        deliveryRes.slice(0, 3).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // HH.ru / LinkedIn — профессиональные данные
+    const hhRes = hhData.organic_results || [];
+    if (hhRes.length) {
+        totalFound++;
+        let msg = `💼 <b>HH.ru / LinkedIn — работа:</b>\n\n`;
+        hhRes.slice(0, 4).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // ГИБДД — водительские данные
+    const gibddRes = gibddData.organic_results || [];
+    if (gibddRes.length) {
+        totalFound++;
+        let msg = `🚗 <b>ГИБДД — водительские данные:</b>\n\n`;
+        gibddRes.slice(0, 4).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Государственные базы
+    const govRes = govData.organic_results || [];
+    if (govRes.length) {
+        totalFound++;
+        const allText = govRes.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+        const innMatch = allText.match(/ИНН\s*[:：]?\s*(\d{10,12})/i);
+        const snilsMatch = allText.match(/СНИЛС\s*[:：]?\s*([\d\-]{11,14})/i);
+        let msg = `🏛 <b>Государственные базы (ИНН / СНИЛС / ФНС):</b>\n\n`;
+        if (innMatch)   msg += `🔢 ИНН: <code>${innMatch[1]}</code>\n`;
+        if (snilsMatch) msg += `🔢 СНИЛС: <code>${snilsMatch[1]}</code>\n`;
+        if (innMatch || snilsMatch) msg += '\n';
+        govRes.slice(0, 3).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Сайты с утечками
+    const leakRes = leakSites.organic_results || [];
+    if (leakRes.length) {
+        totalFound++;
+        let msg = `🚨 <b>Упоминания в слитых базах данных:</b>\n\n`;
+        leakRes.slice(0, 4).forEach(r => {
+            msg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) msg += `  <i>${r.snippet.slice(0, 100)}</i>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    if (totalFound === 0) {
+        await ctx.reply(`📭 По запросу "<b>${query}</b>" утечек в открытых источниках не найдено.`, { parse_mode: 'HTML' });
+    } else {
+        await ctx.reply(`✅ <b>Найдено в ${totalFound} источниках</b>`, { parse_mode: 'HTML' });
+    }
+
+    // Ссылки для глубокой ручной проверки
+    const enc = encodeURIComponent(query);
+    await ctx.reply(
+        `🔎 <b>Проверьте вручную в базах утечек:</b>\n\n` +
+        `🔓 <a href="https://leakcheck.io/?query=${enc}">LeakCheck.io</a>\n` +
+        `🔍 <a href="https://haveibeenpwned.com/account/${enc}">HaveIBeenPwned</a>\n` +
+        `💾 <a href="https://dehashed.com/search?query=${enc}">Dehashed</a>\n` +
+        `🔎 <a href="https://www.google.com/search?q=%22${enc}%22+%22password%22+OR+%22passwd%22+OR+%22leaked%22">Google: пароли</a>\n` +
+        `📋 <a href="https://www.google.com/search?q=%22${enc}%22+filetype:txt+OR+filetype:csv+OR+filetype:sql">Google: файлы дампов</a>`,
         { parse_mode: 'HTML', disable_web_page_preview: true }
     );
 }
