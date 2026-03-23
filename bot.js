@@ -52,7 +52,7 @@ if (!BOT_TOKEN) {
 
 // Costs in stars
 const COSTS = {
-    ip_lookup:       5,
+    ip_lookup:        5,
     phone_lookup:    10,
     person_search:   15,
     photo_search:    10,
@@ -60,8 +60,13 @@ const COSTS = {
     kompromat:       20,
     email_search:    10,
     username_search: 10,
-    whois_lookup:    5,
-    full_dossier:    45,   // saves 35★ vs buying separately
+    whois_lookup:     5,
+    reverse_image:   25,  // Google Lens — определить личность по фото
+    telegram_lookup: 10,  // Telegram профиль по нику/ID
+    car_lookup:      15,  // Пробив авто по гос.номеру
+    connections:     20,  // Связи и окружение человека
+    doc_search:      20,  // Поиск по документам / паспорту
+    full_dossier:    45,  // всё сразу (экономия 35⭐)
 };
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -155,7 +160,18 @@ function mainMenuKeyboard() {
             Markup.button.callback('📧 Email',     'email_search'),
             Markup.button.callback('👾 Ник',       'username_search'),
         ],
-        [Markup.button.callback('🔍 WHOIS / Домен', 'whois_lookup')],
+        [
+            Markup.button.callback('🔍 WHOIS',         'whois_lookup'),
+            Markup.button.callback('✈️ Telegram',       'telegram_lookup'),
+        ],
+        [
+            Markup.button.callback('📷 Поиск по фото', 'reverse_image'),
+            Markup.button.callback('🚗 Пробив авто',   'car_lookup'),
+        ],
+        [
+            Markup.button.callback('🔗 Связи/окружение', 'connections'),
+            Markup.button.callback('📄 Документы',        'doc_search'),
+        ],
         [
             Markup.button.callback('⭐ Купить звёзды', 'buy_stars'),
             Markup.button.callback('💰 Баланс',        'show_balance'),
@@ -374,6 +390,11 @@ const ACTION_PROMPTS = {
     email_search:    `📧 Введите <b>email-адрес</b> для поиска:\nПример: <code>user@mail.ru</code>\n\n💰 Стоимость: ${COSTS.email_search} ⭐`,
     username_search: `👾 Введите <b>никнейм</b> для поиска по всем платформам:\nПример: <code>username123</code>\n\n💰 Стоимость: ${COSTS.username_search} ⭐`,
     whois_lookup:    `🔍 Введите <b>домен или IP</b> для WHOIS-запроса:\nПример: <code>google.com</code> или <code>8.8.8.8</code>\n\n💰 Стоимость: ${COSTS.whois_lookup} ⭐`,
+    telegram_lookup: `✈️ <b>Поиск в Telegram</b>\n\nВведите <b>@username</b> или числовой <b>ID</b> пользователя:\nПример: <code>@durov</code> или <code>12345678</code>\n\n💰 Стоимость: ${COSTS.telegram_lookup} ⭐`,
+    car_lookup:      `🚗 <b>Пробив авто</b>\n\nВведите <b>государственный номер</b> автомобиля:\nПример: <code>А123БВ77</code> или <code>A123BV77</code>\n\n💰 Стоимость: ${COSTS.car_lookup} ⭐`,
+    connections:     `🔗 <b>Связи и окружение</b>\n\nВведите <b>ФИО</b> — найдём семью, коллег, партнёров:\nПример: <code>Иванов Иван Иванович</code>\n\n💰 Стоимость: ${COSTS.connections} ⭐`,
+    doc_search:      `📄 <b>Поиск по документам</b>\n\nВведите номер паспорта, ИНН, СНИЛС или ФИО:\nПример: <code>4510 123456</code> или <code>500110474504</code>\n\n💰 Стоимость: ${COSTS.doc_search} ⭐`,
+    reverse_image:   `📷 <b>Поиск личности по фото</b>\n\nОтправьте <b>фотографию</b> — бот определит кто на ней через Google Lens и найдёт все упоминания в сети.\n\n💰 Стоимость: ${COSTS.reverse_image} ⭐`,
 };
 
 Object.keys(ACTION_PROMPTS).forEach(action => {
@@ -508,6 +529,49 @@ bot.action('adm_broadcast', (ctx) => isAdmin(ctx, () => {
     ctx.reply('📢 Введите сообщение для рассылки всем активным пользователям:');
 }));
 
+// ─── Photo handler (для обратного поиска по фото) ────────────────────────────
+bot.on('photo', async (ctx) => {
+    const userId = ctx.from.id;
+    const state  = userStates.get(userId);
+    if (!state || state.action !== 'reverse_image') return;
+
+    const user = await getUser(userId).catch(() => null);
+    if (!user || user.banned || !user.allowed) {
+        userStates.delete(userId);
+        return ctx.reply('⛔ Доступ запрещён.');
+    }
+
+    const adminRow = await new Promise(r =>
+        db.get('SELECT 1 FROM admins WHERE telegram_id = ?', [userId], (_, row) => r(row))
+    );
+    const isAdminUser = !!adminRow;
+
+    const cost = COSTS.reverse_image;
+    if (!isAdminUser && user.stars < cost) {
+        userStates.delete(userId);
+        return ctx.reply(`❌ Недостаточно звёзд. Нужно ${cost} ⭐`, {
+            ...Markup.inlineKeyboard([[Markup.button.callback('⭐ Купить', 'buy_stars')]])
+        });
+    }
+
+    userStates.delete(userId);
+    if (!isAdminUser) await updateStars(userId, -cost);
+    logRequest(userId, 'reverse_image', 'photo', cost);
+
+    const balInfo = isAdminUser ? '👑 Админ — бесплатно' : `Остаток: ${user.stars - cost} ⭐`;
+    await ctx.reply(`⏳ Анализирую фотографию...\n<i>${balInfo}</i>`, { parse_mode: 'HTML' });
+
+    try {
+        // Берём наибольший доступный размер фото
+        const photos = ctx.message.photo;
+        const best   = photos[photos.length - 1];
+        await handleReverseImageSearch(ctx, best.file_id);
+    } catch (err) {
+        console.error('[reverse_image] error:', err.message);
+        ctx.reply('❌ Ошибка при анализе фотографии. Попробуйте другое изображение.');
+    }
+});
+
 // ─── Text handler ─────────────────────────────────────────────────────────────
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
@@ -584,6 +648,14 @@ bot.on('text', async (ctx) => {
             case 'email_search':    await handleEmailSearch(ctx, text);    break;
             case 'username_search': await handleUsernameSearch(ctx, text); break;
             case 'whois_lookup':    await handleWhoisLookup(ctx, text);    break;
+            case 'telegram_lookup': await handleTelegramLookup(ctx, text); break;
+            case 'car_lookup':      await handleCarLookup(ctx, text);      break;
+            case 'connections':     await handleConnections(ctx, text);    break;
+            case 'doc_search':      await handleDocSearch(ctx, text);      break;
+            case 'reverse_image':
+                await ctx.reply('📷 Пожалуйста, отправьте <b>фотографию</b> (не файл, а именно фото).', { parse_mode: 'HTML' });
+                userStates.set(userId, { action: 'reverse_image' }); // восстановить состояние
+                return;
             case 'full_dossier':    await handleFullDossier(ctx, text);    break;
         }
     } catch (err) {
@@ -804,10 +876,12 @@ async function handlePhoneLookup(ctx, phone) {
     }
     await ctx.reply(msg, { parse_mode: 'HTML' });
 
-    // Google owner search
-    const [ownerData, vkData] = await Promise.all([
-        googleSearch(`"${clean}" владелец телефона ФИО`),
-        googleSearch(`"${clean}" site:vk.com OR site:ok.ru`),
+    // Параллельный поиск владельца номера из множества источников
+    const [ownerData, vkData, getcontactData, spravData] = await Promise.all([
+        googleSearch(`"${clean}" владелец телефона ФИО имя`),
+        googleSearch(`"${clean}" site:vk.com OR site:ok.ru OR site:t.me`),
+        googleSearch(`"${clean}" site:getcontact.com OR site:callback.ru OR site:whocallsme.com OR site:neberitrubku.ru`),
+        googleSearch(`"${clean}" site:spravnik.com OR site:nomerorg.com OR site:zvonili.com OR site:ktozvonit.com`),
     ]);
 
     const results = ownerData.organic_results || [];
@@ -826,15 +900,44 @@ async function handlePhoneLookup(ctx, phone) {
         await ctx.reply(ownerMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
     }
 
+    // GetContact и базы идентификации звонков
+    const gcResults = [...(getcontactData.organic_results || []), ...(spravData.organic_results || [])];
+    if (gcResults.length) {
+        let gcMsg = `📟 <b>Базы определителя номеров:</b>\n\n`;
+        gcResults.slice(0, 4).forEach(r => {
+            gcMsg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) {
+                const c = extractContactInfo(r.snippet);
+                gcMsg += `  <i>${r.snippet.slice(0, 150)}</i>\n`;
+                if (c.addresses.length) gcMsg += `  📍 ${c.addresses[0]}\n`;
+            }
+            gcMsg += '\n';
+        });
+        await ctx.reply(gcMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
     const vkResults = vkData.organic_results || [];
     if (vkResults.length) {
         let vkMsg = `📱 <b>Профили в соцсетях:</b>\n\n`;
         vkResults.slice(0, 3).forEach(r => {
-            const net = r.domain?.includes('vk.com') ? '🔵 ВКонтакте' : r.domain?.includes('ok.ru') ? '🟠 ОК' : '🌐';
-            vkMsg += `${net}: <a href="${r.link}">${r.title}</a>\n${r.snippet || ''}\n\n`;
+            const net = r.domain?.includes('vk.com') ? '🔵 ВКонтакте' : r.domain?.includes('ok.ru') ? '🟠 ОК' : r.domain?.includes('t.me') ? '✈️ Telegram' : '🌐';
+            vkMsg += `${net}: <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) vkMsg += `  <i>${r.snippet.slice(0, 100)}</i>\n`;
+            vkMsg += '\n';
         });
         await ctx.reply(vkMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
     }
+
+    // Прямые ссылки
+    const encPhone = encodeURIComponent(clean);
+    await ctx.reply(
+        `🔎 <b>Проверьте вручную:</b>\n\n` +
+        `📞 <a href="https://getcontact.com/search?q=${encPhone}">GetContact — имя владельца</a>\n` +
+        `📋 <a href="https://callback.ru/search/?q=${encPhone}">Callback.ru</a>\n` +
+        `🔍 <a href="https://neberitrubku.ru/${encPhone}">Небери трубку</a>\n` +
+        `🌐 <a href="https://www.truecaller.com/search/ru/${encPhone}">Truecaller</a>`,
+        { parse_mode: 'HTML', disable_web_page_preview: true }
+    );
 }
 
 // ─── Person Search ────────────────────────────────────────────────────────────
@@ -1321,6 +1424,331 @@ async function handleWhoisLookup(ctx, target) {
         });
         await ctx.reply(domMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
     }
+}
+
+// ─── Reverse Image Search (Google Lens) ──────────────────────────────────────
+async function handleReverseImageSearch(ctx, fileId) {
+    // Получаем прямую ссылку на файл через Telegram
+    const fileLink = await bot.telegram.getFileLink(fileId);
+    const imageUrl = fileLink.toString();
+
+    // Google Lens поиск
+    const lensData = await axios.get('https://www.searchapi.io/api/v1/search', {
+        params: { engine: 'google_lens', url: imageUrl, api_key: SEARCHAPI_KEY },
+        timeout: 30000,
+    }).then(r => r.data).catch(() => null);
+
+    const matches = lensData?.visual_matches || [];
+    const kg      = lensData?.knowledge_graph;
+
+    // Knowledge Graph — если Google распознал личность
+    if (kg?.title) {
+        const kgText = renderKG(kg);
+        if (kgText) await ctx.reply(kgText, { parse_mode: 'HTML' });
+    }
+
+    if (matches.length === 0) {
+        // Fallback: Google Images reverse search
+        const fallback = await googleSearch('', {
+            engine: 'google_images',
+            extra: { image_url: imageUrl, search_type: 'reverse' }
+        }).catch(() => null);
+        await ctx.reply('🔍 Google Lens не нашёл точных совпадений. Попробуйте Яндекс:\n' +
+            `<a href="https://yandex.ru/images/search?rpt=imageview&url=${encodeURIComponent(imageUrl)}">🔍 Яндекс.Картинки — найти похожие</a>\n` +
+            `<a href="https://images.google.com/searchbyimage?image_url=${encodeURIComponent(imageUrl)}">🔍 Google Images — найти похожие</a>`,
+            { parse_mode: 'HTML', disable_web_page_preview: true });
+        return;
+    }
+
+    let msg = `📷 <b>Результаты обратного поиска по фото:</b>\n\n`;
+    msg += `🔢 Найдено совпадений: ${matches.length}\n\n`;
+
+    matches.slice(0, 6).forEach((m, i) => {
+        msg += `<b>${i + 1}. ${m.title || '—'}</b>\n`;
+        if (m.source) msg += `🌐 ${m.source}\n`;
+        msg += `🔗 <a href="${m.link}">${m.domain || m.link?.slice(0, 50)}</a>\n\n`;
+    });
+
+    await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+
+    // Отправляем превью найденных фото
+    let sent = 0;
+    for (const m of matches.slice(0, 4)) {
+        if (sent >= 3) break;
+        const img = m.image?.link || m.thumbnail;
+        if (img && !img.startsWith('data:')) {
+            if (await sendPhotoSafe(ctx, m.title || '', img)) sent++;
+        }
+    }
+
+    // Ссылки для ручной проверки
+    await ctx.reply(
+        `🔍 <b>Проверить вручную:</b>\n\n` +
+        `<a href="https://yandex.ru/images/search?rpt=imageview&url=${encodeURIComponent(imageUrl)}">Яндекс.Картинки</a>  ` +
+        `<a href="https://images.google.com/searchbyimage?image_url=${encodeURIComponent(imageUrl)}">Google Images</a>  ` +
+        `<a href="https://www.tineye.com/search?url=${encodeURIComponent(imageUrl)}">TinEye</a>`,
+        { parse_mode: 'HTML', disable_web_page_preview: true }
+    );
+}
+
+// ─── Telegram User Lookup ─────────────────────────────────────────────────────
+async function handleTelegramLookup(ctx, query) {
+    const clean   = query.replace(/^@/, '').trim();
+    const isId    = /^\d+$/.test(clean);
+
+    await ctx.reply(`✈️ <b>Telegram поиск: ${query}</b>`, { parse_mode: 'HTML' });
+
+    // Получаем публичный профиль через Telegram API
+    let chatInfo = null;
+    try {
+        chatInfo = await bot.telegram.getChat(isId ? parseInt(clean) : `@${clean}`);
+    } catch (e) {
+        // Приватный аккаунт или не существует — продолжаем с Google-поиском
+    }
+
+    if (chatInfo) {
+        let msg = `✈️ <b>Telegram профиль:</b>\n\n`;
+        msg += `🆔 ID: <code>${chatInfo.id}</code>\n`;
+        if (chatInfo.username)    msg += `👤 Username: @${chatInfo.username}\n`;
+        if (chatInfo.first_name)  msg += `📛 Имя: ${chatInfo.first_name}`;
+        if (chatInfo.last_name)   msg += ` ${chatInfo.last_name}`;
+        if (chatInfo.first_name)  msg += '\n';
+        if (chatInfo.title)       msg += `📢 Название: ${chatInfo.title}\n`;
+        if (chatInfo.description) msg += `📝 Описание: ${chatInfo.description}\n`;
+        if (chatInfo.bio)         msg += `📖 Bio: ${chatInfo.bio}\n`;
+        if (chatInfo.member_count) msg += `👥 Участников: ${chatInfo.member_count}\n`;
+        if (chatInfo.type)        msg += `📂 Тип: ${chatInfo.type}\n`;
+        msg += `🔗 Ссылка: <a href="https://t.me/${chatInfo.username || clean}">t.me/${chatInfo.username || clean}</a>\n`;
+
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+
+        // Получаем фото профиля
+        try {
+            const photos = await bot.telegram.getUserProfilePhotos(chatInfo.id, { limit: 1 });
+            if (photos.total_count > 0) {
+                const photoId = photos.photos[0][photos.photos[0].length - 1].file_id;
+                const photoLink = await bot.telegram.getFileLink(photoId);
+                await sendPhotoSafe(ctx, `📸 Фото профиля @${chatInfo.username || clean}`, photoLink.toString());
+            }
+        } catch (_) {}
+    } else {
+        await ctx.reply(`ℹ️ Профиль @${clean} приватный или не найден в Telegram. Ищу в открытых источниках...`);
+    }
+
+    // Google-поиск по юзернейму в Telegram
+    const [googleData, socialData] = await Promise.all([
+        googleSearch(`"@${clean}" OR "t.me/${clean}" Telegram`),
+        googleSearch(`site:t.me "${clean}" OR "@${clean}"`),
+    ]);
+
+    const results = [...(googleData.organic_results || []), ...(socialData.organic_results || [])];
+    const seen = new Set();
+    const unique = results.filter(r => !seen.has(r.link) && seen.add(r.link));
+
+    if (unique.length) {
+        let msg = `🔍 <b>Упоминания в сети:</b>\n\n`;
+        unique.slice(0, 5).forEach((r, i) => {
+            msg += `<b>${i + 1}. ${r.title}</b>\n`;
+            if (r.snippet) msg += `${r.snippet.slice(0, 120)}\n`;
+            msg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+}
+
+// ─── Car Lookup (Пробив авто) ─────────────────────────────────────────────────
+async function handleCarLookup(ctx, plate) {
+    const cleanPlate = plate.toUpperCase().replace(/\s/g, '');
+    await ctx.reply(`🚗 <b>Пробив авто: ${cleanPlate}</b>\nИщу в базах данных...`, { parse_mode: 'HTML' });
+
+    const [mainData, autoData, fineData] = await Promise.all([
+        googleSearch(`"${cleanPlate}" автомобиль владелец`),
+        googleSearch(`"${cleanPlate}" site:avtonomer.net OR site:avtocod.ru OR site:carteka.ru OR site:carinfo.ru OR site:gibdd-check.ru`),
+        googleSearch(`"${cleanPlate}" штрафы ГИБДД нарушения`),
+    ]);
+
+    // Основные результаты + извлечение данных
+    const allText = [...(mainData.organic_results || []), ...(autoData.organic_results || [])]
+        .map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+    const contacts = extractContactInfo(allText);
+
+    let msg = `🚗 <b>Автомобиль: ${cleanPlate}</b>\n\n`;
+    if (contacts.phones.length)    msg += `📞 Телефоны: ${contacts.phones.join(', ')}\n`;
+    if (contacts.addresses.length) msg += `📍 Адреса: ${contacts.addresses[0]}\n`;
+    if (contacts.phones.length || contacts.addresses.length) msg += '\n';
+
+    const mainRes = mainData.organic_results || [];
+    if (mainRes.length) {
+        mainRes.slice(0, 4).forEach((r, i) => {
+            msg += `<b>${i + 1}. ${r.title}</b>\n`;
+            if (r.snippet) msg += `${r.snippet}\n`;
+            msg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
+        });
+    } else {
+        msg += '📭 Открытых данных по номеру не найдено.\n\n';
+    }
+    await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+
+    // Автобазы
+    const autoRes = autoData.organic_results || [];
+    if (autoRes.length) {
+        let autoMsg = `📋 <b>Данные из автобаз:</b>\n\n`;
+        autoRes.slice(0, 4).forEach(r => {
+            autoMsg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) autoMsg += `  <i>${r.snippet.slice(0, 120)}</i>\n\n`;
+        });
+        await ctx.reply(autoMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Штрафы
+    const fineRes = fineData.organic_results || [];
+    if (fineRes.length) {
+        let fineMsg = `🚔 <b>Штрафы и нарушения:</b>\n\n`;
+        fineRes.slice(0, 3).forEach(r => {
+            fineMsg += `• <a href="${r.link}">${r.title}</a>\n${r.snippet ? r.snippet.slice(0,100) + '\n' : ''}\n`;
+        });
+        await ctx.reply(fineMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Прямые ссылки на базы
+    const enc = encodeURIComponent(cleanPlate);
+    await ctx.reply(
+        `🔎 <b>Проверьте вручную:</b>\n\n` +
+        `🚗 <a href="https://avtocod.ru/check-auto?freeReportInput=${enc}">avtocod.ru — история авто</a>\n` +
+        `🔍 <a href="https://carinfo.ru/">carinfo.ru — по VIN/номеру</a>\n` +
+        `👮 <a href="https://xn--90adear.xn--p1ai/check/fines#${enc}">ГИБДД — штрафы</a>\n` +
+        `📋 <a href="https://www.autocode.ru/app/cars/${enc}/">autocode.ru</a>`,
+        { parse_mode: 'HTML', disable_web_page_preview: true }
+    );
+}
+
+// ─── Connections (Связи и окружение) ─────────────────────────────────────────
+async function handleConnections(ctx, query) {
+    await ctx.reply(`🔗 <b>Связи и окружение: ${query}</b>\nАнализирую...`, { parse_mode: 'HTML' });
+
+    const [familyData, workData, associatesData, conflictData] = await Promise.all([
+        googleSearch(`"${query}" (жена OR муж OR брат OR сестра OR сын OR дочь OR родители OR родственники)`),
+        googleSearch(`"${query}" (коллеги OR партнёр OR соучредитель OR директор OR компания OR работает OR должность)`),
+        googleSearch(`"${query}" (друг OR знакомый OR окружение OR сообщник OR связан OR связанный)`),
+        googleSearch(`"${query}" (конфликт OR спор OR враг OR противник OR претензии OR иск)`),
+    ]);
+
+    // Семья
+    const familyRes = familyData.organic_results || [];
+    if (familyRes.length) {
+        let msg = `👨‍👩‍👧 <b>Семья и родственники:</b>\n\n`;
+        familyRes.slice(0, 4).forEach((r, i) => {
+            msg += `<b>${i + 1}. ${r.title}</b>\n`;
+            if (r.snippet) msg += `${r.snippet}\n`;
+            msg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    } else {
+        await ctx.reply('👨‍👩‍👧 Данных о родственниках не найдено.');
+    }
+
+    // Работа и партнёры
+    const workRes = workData.organic_results || [];
+    if (workRes.length) {
+        let msg = `💼 <b>Работа и деловые связи:</b>\n\n`;
+        workRes.slice(0, 4).forEach((r, i) => {
+            msg += `<b>${i + 1}. ${r.title}</b>\n`;
+            if (r.snippet) msg += `${r.snippet}\n`;
+            msg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Окружение
+    const assocRes = associatesData.organic_results || [];
+    if (assocRes.length) {
+        let msg = `🤝 <b>Знакомые и окружение:</b>\n\n`;
+        assocRes.slice(0, 3).forEach((r, i) => {
+            msg += `<b>${i + 1}. ${r.title}</b>\n`;
+            if (r.snippet) msg += `${r.snippet}\n`;
+            msg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Конфликты
+    const conflictRes = conflictData.organic_results || [];
+    if (conflictRes.length) {
+        let msg = `⚡ <b>Конфликты и противники:</b>\n\n`;
+        conflictRes.slice(0, 3).forEach((r, i) => {
+            msg += `<b>${i + 1}. ${r.title}</b>\n`;
+            if (r.snippet) msg += `${r.snippet}\n`;
+            msg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
+        });
+        await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+}
+
+// ─── Document Search (Документы и паспорт) ───────────────────────────────────
+async function handleDocSearch(ctx, query) {
+    await ctx.reply(`📄 <b>Поиск по документам: ${query}</b>`, { parse_mode: 'HTML' });
+
+    const [mainData, leakData, govData] = await Promise.all([
+        googleSearch(`"${query}" паспорт документы данные`),
+        googleSearch(`"${query}" (утечка OR слив OR leaked OR breach OR база данных)`),
+        googleSearch(`"${query}" site:nalog.ru OR site:gosuslugi.ru OR site:rosreestr.ru OR site:egrul.nalog.ru`),
+    ]);
+
+    const results = mainData.organic_results || [];
+    const allText = results.map(r => `${r.title} ${r.snippet || ''}`).join(' ');
+    const contacts = extractContactInfo(allText);
+
+    let msg = `📄 <b>Результаты поиска: ${query}</b>\n\n`;
+    if (contacts.phones.length)    msg += `📞 ${contacts.phones.join(', ')}\n`;
+    if (contacts.addresses.length) msg += `📍 ${contacts.addresses.join(' | ')}\n`;
+    if (contacts.emails.length)    msg += `📧 ${contacts.emails.join(', ')}\n`;
+    if (contacts.phones.length || contacts.addresses.length || contacts.emails.length) msg += '\n';
+
+    if (results.length) {
+        results.slice(0, 5).forEach((r, i) => {
+            msg += `<b>${i + 1}. ${r.title}</b>\n`;
+            if (r.snippet) msg += `${r.snippet}\n`;
+            msg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
+        });
+    } else {
+        msg += '📭 Прямых совпадений не найдено.\n\n';
+    }
+    await ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
+
+    // Утечки данных
+    const leakRes = leakData.organic_results || [];
+    if (leakRes.length) {
+        let leakMsg = `🔓 <b>Возможные утечки с этими данными:</b>\n\n`;
+        leakRes.slice(0, 4).forEach((r, i) => {
+            leakMsg += `<b>${i + 1}. ${r.title}</b>\n`;
+            if (r.snippet) leakMsg += `${r.snippet}\n`;
+            leakMsg += `🔗 <a href="${r.link}">${r.domain || r.link}</a>\n\n`;
+        });
+        await ctx.reply(leakMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Гос. базы
+    const govRes = govData.organic_results || [];
+    if (govRes.length) {
+        let govMsg = `🏛 <b>Государственные базы данных:</b>\n\n`;
+        govRes.slice(0, 4).forEach(r => {
+            govMsg += `• <a href="${r.link}">${r.title}</a>\n`;
+            if (r.snippet) govMsg += `  <i>${r.snippet.slice(0, 120)}</i>\n\n`;
+        });
+        await ctx.reply(govMsg, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
+    // Прямые ссылки
+    const enc = encodeURIComponent(query);
+    await ctx.reply(
+        `🔎 <b>Проверьте вручную:</b>\n\n` +
+        `📋 <a href="https://egrul.nalog.ru/index.html">ЕГРЮЛ/ЕГРИП (ИНН)</a>\n` +
+        `👮 <a href="https://xn--b1afk4ade4e.xn--b1ab2a0a.xn--b1aew.xn--p1ai/info-service.htm#!5">МВД — действительность паспорта</a>\n` +
+        `🏠 <a href="https://rosreestr.gov.ru/wps/portal/online_check">Росреестр — недвижимость</a>\n` +
+        `💰 <a href="https://fssp.gov.ru/iss/ip/?territory=0&predmet=0&name=${enc}">ФССП — долги</a>\n` +
+        `🔍 <a href="https://leakcheck.io/?query=${enc}">LeakCheck.io — утечки</a>`,
+        { parse_mode: 'HTML', disable_web_page_preview: true }
+    );
 }
 
 // ─── Full Dossier ─────────────────────────────────────────────────────────────
