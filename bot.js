@@ -406,15 +406,22 @@ bot.action(/^quick_addr:(.+)$/, async (ctx) => {
 
 bot.action('show_balance', (ctx) => {
     ctx.answerCbQuery().catch(() => {});
-    db.get('SELECT stars FROM users WHERE telegram_id = ?', [ctx.from.id], (err, row) => {
-        if (err || !row) return ctx.reply('Пользователь не найден.');
-        const costs = Object.entries(COSTS)
-            .map(([k, v]) => `${v} ⭐ — ${k.replace(/_/g, ' ')}`)
-            .join('\n');
-        ctx.reply(
-            `💰 <b>Ваш баланс: ${row.stars} ⭐</b>\n\n<b>Стоимость запросов:</b>\n${costs}`,
-            { parse_mode: 'HTML' }
-        );
+    const userId = ctx.from.id;
+    db.get('SELECT * FROM admins WHERE telegram_id = ?', [userId], (_, adminRow) => {
+        db.get('SELECT stars FROM users WHERE telegram_id = ?', [userId], (err, row) => {
+            if (err || !row) return ctx.reply('Пользователь не найден.');
+            const isAdminUser = !!adminRow;
+            const costs = Object.entries(COSTS)
+                .map(([k, v]) => `${v} ⭐ — ${k.replace(/_/g, ' ')}`)
+                .join('\n');
+            const balanceLine = isAdminUser
+                ? `👑 <b>Администратор — неограниченный доступ</b>`
+                : `💰 <b>Баланс: ${row.stars} ⭐</b>`;
+            ctx.reply(
+                `${balanceLine}\n\n<b>Стоимость запросов:</b>\n${costs}`,
+                { parse_mode: 'HTML' }
+            );
+        });
     });
 });
 
@@ -535,15 +542,21 @@ bot.on('text', async (ctx) => {
         return ctx.reply(`❌ ${valid}\n\nПопробуйте ещё раз или нажмите /cancel для отмены.`);
     }
 
-    // Rate limiting
-    if (!checkRateLimit(userId)) {
+    // Проверяем является ли пользователь администратором
+    const adminRow = await new Promise(resolve =>
+        db.get('SELECT * FROM admins WHERE telegram_id = ?', [userId], (_, r) => resolve(r))
+    );
+    const isAdminUser = !!adminRow;
+
+    // Rate limiting (для обычных пользователей)
+    if (!isAdminUser && !checkRateLimit(userId)) {
         userStates.delete(userId);
         return ctx.reply(`⏱ Превышен лимит запросов (${RATE_LIMIT}/час). Попробуйте позже.`);
     }
 
-    // Stars check
+    // Stars check (администраторы не тратят звёзды)
     const cost = COSTS[state.action] || 0;
-    if (user.stars < cost) {
+    if (!isAdminUser && user.stars < cost) {
         userStates.delete(userId);
         return ctx.reply(
             `❌ Недостаточно звёзд.\nНужно: <b>${cost} ⭐</b>  |  У вас: <b>${user.stars} ⭐</b>`,
@@ -552,11 +565,13 @@ bot.on('text', async (ctx) => {
     }
 
     userStates.delete(userId);
-    await updateStars(userId, -cost);
+    if (!isAdminUser) await updateStars(userId, -cost);
     logRequest(userId, state.action, text, cost);
 
-    const remaining = user.stars - cost;
-    await ctx.reply(`⏳ Выполняю поиск...\n<i>Остаток: ${remaining} ⭐</i>`, { parse_mode: 'HTML' });
+    const balanceInfo = isAdminUser
+        ? `<i>👑 Админ — бесплатно</i>`
+        : `<i>Остаток: ${user.stars - cost} ⭐</i>`;
+    await ctx.reply(`⏳ Выполняю поиск...\n${balanceInfo}`, { parse_mode: 'HTML' });
 
     try {
         switch (state.action) {
